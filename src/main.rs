@@ -9,7 +9,7 @@ fn log_tool() -> figure_8::ToolDef {
 
 #[tokio::main]
 async fn main() {
-    let browser = browser::Browser::new();
+    let browser = browser::Browser::new(browser::Browser::default_config());
 
     let interface = browser::register_tools(
         Interface::builder("browser_agent").tool(log_tool()),

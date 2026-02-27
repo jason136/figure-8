@@ -8,41 +8,59 @@ use crate::sandbox::tool::ToolDef;
 use crate::{ToolError, tool_async};
 
 pub struct Browser {
-    page: RwLock<Option<Arc<Page>>>,
+    inner: RwLock<BrowserInner>,
+}
+
+enum BrowserInner {
+    Pending(Box<chromiumoxide::BrowserConfig>),
+    Initialized {
+        _browser: Box<chromiumoxide::Browser>,
+        page: Arc<Page>,
+    },
 }
 
 impl Browser {
-    pub fn new() -> Arc<Self> {
+    pub fn new(config: chromiumoxide::BrowserConfig) -> Arc<Self> {
         Arc::new(Browser {
-            page: RwLock::new(None),
+            inner: RwLock::new(BrowserInner::Pending(Box::new(config))),
         })
     }
 
+    pub fn default_config() -> chromiumoxide::BrowserConfig {
+        chromiumoxide::BrowserConfig::builder()
+            .arg("--disable-gpu")
+            .arg("--disable-dev-shm-usage")
+            .build()
+            .unwrap()
+    }
+
     async fn ensure_browser(&self) -> Result<Arc<Page>, ToolError> {
-        self.page
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| ToolError::custom("browser not launched -- call page.launch() first"))
+        match &*self.inner.read().await {
+            BrowserInner::Pending(_) => Err(ToolError::custom(
+                "browser not launched -- call page.launch() first",
+            )),
+            BrowserInner::Initialized { page, .. } => Ok(page.clone()),
+        }
     }
 
     async fn launch_browser(&self) -> Result<(), ToolError> {
-        let config = chromiumoxide::BrowserConfig::builder()
-            .no_sandbox()
-            .build()
-            .map_err(ToolError::custom)?;
+        let config = match &*self.inner.read().await {
+            BrowserInner::Pending(config) => config.clone(),
+            BrowserInner::Initialized { .. } => return Ok(()),
+        };
 
-        let (browser, mut handler) = chromiumoxide::Browser::launch(config).await?;
+        let (browser, mut handler) = chromiumoxide::Browser::launch(*config).await?;
 
         tokio::spawn(async move { while handler.next().await.is_some() {} });
 
         let page = browser.new_page("about:blank").await?;
+        page.wait_for_navigation().await?;
 
-        // Keep browser alive by leaking it -- it lives as long as the process.
-        // The Page holds an Arc to the browser internally.
-        std::mem::forget(browser);
+        *self.inner.write().await = BrowserInner::Initialized {
+            _browser: Box::new(browser),
+            page: Arc::new(page),
+        };
 
-        *self.page.write().await = Some(Arc::new(page));
         Ok(())
     }
 }

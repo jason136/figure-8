@@ -371,7 +371,6 @@ impl<V: ToV8> ToV8 for HashMap<String, V> {
 pub enum MarshalError {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: &'static str, got: String },
-
     #[error("conversion failed: {0}")]
     ConversionFailed(String),
 }
