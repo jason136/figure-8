@@ -3,19 +3,19 @@ use std::fmt;
 
 use thiserror::Error;
 
-pub trait TsTyped: 'static {
+pub trait TsTyped {
     fn ts_type() -> TsType;
 }
 
-pub trait FromV8: TsTyped + Sized {
+pub trait FromV8: Sized {
     fn from_v8(
         scope: &mut v8::PinScope<'_, '_>,
         value: v8::Local<v8::Value>,
     ) -> Result<Self, MarshalError>;
 }
 
-pub trait IntoV8: TsTyped {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value>;
+pub trait ToV8: TsTyped {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,7 +114,7 @@ impl FromV8 for f64 {
     ) -> Result<Self, MarshalError> {
         value.number_value(scope).ok_or(MarshalError::TypeMismatch {
             expected: "number",
-            got: value_type_name(scope, value),
+            got: value.to_rust_string_lossy(scope),
         })
     }
 }
@@ -126,7 +126,7 @@ impl FromV8 for i32 {
     ) -> Result<Self, MarshalError> {
         value.int32_value(scope).ok_or(MarshalError::TypeMismatch {
             expected: "number (i32)",
-            got: value_type_name(scope, value),
+            got: value.to_rust_string_lossy(scope),
         })
     }
 }
@@ -138,7 +138,7 @@ impl FromV8 for u32 {
     ) -> Result<Self, MarshalError> {
         value.uint32_value(scope).ok_or(MarshalError::TypeMismatch {
             expected: "number (u32)",
-            got: value_type_name(scope, value),
+            got: value.to_rust_string_lossy(scope),
         })
     }
 }
@@ -151,7 +151,7 @@ impl FromV8 for String {
         if !value.is_string() {
             return Err(MarshalError::TypeMismatch {
                 expected: "string",
-                got: value_type_name(scope, value),
+                got: value.to_rust_string_lossy(scope),
             });
         }
         Ok(value.to_rust_string_lossy(scope))
@@ -166,7 +166,7 @@ impl FromV8 for bool {
         if !value.is_boolean() {
             return Err(MarshalError::TypeMismatch {
                 expected: "boolean",
-                got: value_type_name(scope, value),
+                got: value.to_rust_string_lossy(scope),
             });
         }
         Ok(value.boolean_value(scope))
@@ -181,17 +181,21 @@ impl<T: FromV8> FromV8 for Vec<T> {
         let array: v8::Local<v8::Array> =
             value.try_into().map_err(|_| MarshalError::TypeMismatch {
                 expected: "Array",
-                got: value_type_name(scope, value),
+                got: value.to_rust_string_lossy(scope),
             })?;
-        let len = array.length();
-        let mut result = Vec::with_capacity(len as usize);
-        for i in 0..len {
-            let elem = array.get_index(scope, i).ok_or_else(|| {
-                MarshalError::ConversionFailed(format!("failed to get array element at index {i}"))
-            })?;
-            result.push(T::from_v8(scope, elem)?);
-        }
-        Ok(result)
+
+        (0..array.length())
+            .map(|i| {
+                T::from_v8(
+                    scope,
+                    array.get_index(scope, i).ok_or_else(|| {
+                        MarshalError::ConversionFailed(format!(
+                            "failed to get array element at index {i}"
+                        ))
+                    })?,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 
@@ -213,171 +217,153 @@ impl FromV8 for serde_json::Value {
         scope: &mut v8::PinScope<'_, '_>,
         value: v8::Local<v8::Value>,
     ) -> Result<Self, MarshalError> {
-        v8_to_json(scope, value)
+        match value {
+            null if value.is_undefined() || value.is_null() => Ok(serde_json::Value::Null),
+            bool if value.is_boolean() => Ok(serde_json::Value::Bool(value.boolean_value(scope))),
+            number if value.is_number() => {
+                Ok(serde_json::json!(value.number_value(scope).unwrap()))
+            }
+            string if value.is_string() => {
+                Ok(serde_json::Value::String(value.to_rust_string_lossy(scope)))
+            }
+            array if value.is_array() => {
+                let arr: v8::Local<v8::Array> = value.try_into().unwrap();
+
+                Ok(serde_json::Value::Array(
+                    (0..arr.length())
+                        .map(|i| {
+                            serde_json::Value::from_v8(scope, arr.get_index(scope, i).unwrap())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
+            object if value.is_object() => {
+                let obj: v8::Local<v8::Object> = value.try_into().unwrap();
+
+                let names = obj
+                    .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+                    .ok_or_else(|| {
+                        MarshalError::ConversionFailed("failed to get property names".into())
+                    })?;
+
+                Ok(serde_json::Value::Object(
+                    (0..names.length())
+                        .map(|i| {
+                            let key = names.get_index(scope, i).unwrap();
+                            let key_str = key.to_rust_string_lossy(scope);
+
+                            Ok((
+                                key_str,
+                                serde_json::Value::from_v8(scope, obj.get(scope, key).unwrap())?,
+                            ))
+                        })
+                        .collect::<Result<_, _>>()?,
+                ))
+            }
+            _ => Err(MarshalError::ConversionFailed("unsupported V8 type".into())),
+        }
     }
 }
 
-impl IntoV8 for f64 {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Number::new(scope, self).into()
+impl ToV8 for f64 {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Number::new(scope, *self).into()
     }
 }
 
-impl IntoV8 for i32 {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Integer::new(scope, self).into()
+impl ToV8 for i32 {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Integer::new(scope, *self).into()
     }
 }
 
-impl IntoV8 for u32 {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Integer::new_from_unsigned(scope, self).into()
+impl ToV8 for u32 {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Integer::new_from_unsigned(scope, *self).into()
     }
 }
 
-impl IntoV8 for String {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::String::new(scope, &self).unwrap().into()
+impl ToV8 for String {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::String::new(scope, self).unwrap().into()
     }
 }
 
-impl IntoV8 for bool {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Boolean::new(scope, self).into()
+impl ToV8 for bool {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Boolean::new(scope, *self).into()
     }
 }
 
-impl IntoV8 for () {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl ToV8 for () {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         v8::undefined(scope).into()
     }
 }
 
-impl<T: IntoV8> IntoV8 for Vec<T> {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<T: ToV8> ToV8 for Vec<T> {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         let array = v8::Array::new(scope, self.len() as i32);
-        for (i, item) in self.into_iter().enumerate() {
-            let val = item.into_v8(scope);
+        for (i, item) in self.iter().enumerate() {
+            let val = item.to_v8(scope);
             array.set_index(scope, i as u32, val);
         }
+
         array.into()
     }
 }
 
-impl<T: IntoV8> IntoV8 for Option<T> {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<T: ToV8> ToV8 for Option<T> {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         match self {
-            Some(val) => val.into_v8(scope),
+            Some(val) => val.to_v8(scope),
             None => v8::undefined(scope).into(),
         }
     }
 }
 
-impl IntoV8 for serde_json::Value {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        json_to_v8(scope, &self)
+impl ToV8 for serde_json::Value {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        match self {
+            serde_json::Value::Null => v8::null(scope).into(),
+            serde_json::Value::Bool(b) => v8::Boolean::new(scope, *b).into(),
+            serde_json::Value::Number(n) => {
+                v8::Number::new(scope, n.as_f64().unwrap_or(0.0)).into()
+            }
+            serde_json::Value::String(s) => v8::String::new(scope, s).unwrap().into(),
+            serde_json::Value::Array(arr) => {
+                let v8_arr = v8::Array::new(scope, arr.len() as i32);
+                for (i, item) in arr.iter().enumerate() {
+                    let val = item.to_v8(scope);
+                    v8_arr.set_index(scope, i as u32, val);
+                }
+
+                v8_arr.into()
+            }
+            serde_json::Value::Object(map) => {
+                let obj = v8::Object::new(scope);
+                for (key, val) in map {
+                    let k = v8::String::new(scope, key).unwrap();
+                    let v = val.to_v8(scope);
+                    obj.set(scope, k.into(), v);
+                }
+
+                obj.into()
+            }
+        }
     }
 }
 
-impl<V: IntoV8> IntoV8 for HashMap<String, V> {
-    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<V: ToV8> ToV8 for HashMap<String, V> {
+    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         let obj = v8::Object::new(scope);
         for (key, value) in self {
-            let k = v8::String::new(scope, &key).unwrap();
-            let v = value.into_v8(scope);
+            let k = v8::String::new(scope, key).unwrap();
+            let v = value.to_v8(scope);
             obj.set(scope, k.into(), v);
         }
+
         obj.into()
-    }
-}
-
-fn value_type_name(scope: &mut v8::PinScope<'_, '_>, value: v8::Local<v8::Value>) -> String {
-    if value.is_undefined() {
-        "undefined".into()
-    } else if value.is_null() {
-        "null".into()
-    } else if value.is_boolean() {
-        "boolean".into()
-    } else if value.is_number() {
-        "number".into()
-    } else if value.is_string() {
-        "string".into()
-    } else if value.is_array() {
-        "array".into()
-    } else if value.is_function() {
-        "function".into()
-    } else if value.is_object() {
-        "object".into()
-    } else {
-        value.to_rust_string_lossy(scope)
-    }
-}
-
-fn v8_to_json(
-    scope: &mut v8::PinScope<'_, '_>,
-    value: v8::Local<v8::Value>,
-) -> Result<serde_json::Value, MarshalError> {
-    if value.is_undefined() || value.is_null() {
-        Ok(serde_json::Value::Null)
-    } else if value.is_boolean() {
-        Ok(serde_json::Value::Bool(value.boolean_value(scope)))
-    } else if value.is_number() {
-        let n = value.number_value(scope).unwrap();
-        Ok(serde_json::json!(n))
-    } else if value.is_string() {
-        Ok(serde_json::Value::String(value.to_rust_string_lossy(scope)))
-    } else if value.is_array() {
-        let array: v8::Local<v8::Array> = value.try_into().unwrap();
-        let mut vec = Vec::with_capacity(array.length() as usize);
-        for i in 0..array.length() {
-            let elem = array.get_index(scope, i).unwrap();
-            vec.push(v8_to_json(scope, elem)?);
-        }
-        Ok(serde_json::Value::Array(vec))
-    } else if value.is_object() {
-        let obj: v8::Local<v8::Object> = value.try_into().unwrap();
-        let names = obj
-            .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
-            .ok_or_else(|| MarshalError::ConversionFailed("failed to get property names".into()))?;
-        let mut map = serde_json::Map::new();
-        for i in 0..names.length() {
-            let key = names.get_index(scope, i).unwrap();
-            let key_str = key.to_rust_string_lossy(scope);
-            let val = obj.get(scope, key).unwrap();
-            map.insert(key_str, v8_to_json(scope, val)?);
-        }
-        Ok(serde_json::Value::Object(map))
-    } else {
-        Err(MarshalError::ConversionFailed("unsupported V8 type".into()))
-    }
-}
-
-fn json_to_v8<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: &serde_json::Value,
-) -> v8::Local<'s, v8::Value> {
-    match value {
-        serde_json::Value::Null => v8::null(scope).into(),
-        serde_json::Value::Bool(b) => v8::Boolean::new(scope, *b).into(),
-        serde_json::Value::Number(n) => v8::Number::new(scope, n.as_f64().unwrap_or(0.0)).into(),
-        serde_json::Value::String(s) => v8::String::new(scope, s).unwrap().into(),
-        serde_json::Value::Array(arr) => {
-            let v8_arr = v8::Array::new(scope, arr.len() as i32);
-            for (i, item) in arr.iter().enumerate() {
-                let val = json_to_v8(scope, item);
-                v8_arr.set_index(scope, i as u32, val);
-            }
-            v8_arr.into()
-        }
-        serde_json::Value::Object(map) => {
-            let obj = v8::Object::new(scope);
-            for (key, val) in map {
-                let k = v8::String::new(scope, key).unwrap();
-                let v = json_to_v8(scope, val);
-                obj.set(scope, k.into(), v);
-            }
-            obj.into()
-        }
     }
 }
 
@@ -385,6 +371,7 @@ fn json_to_v8<'s>(
 pub enum MarshalError {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: &'static str, got: String },
+
     #[error("conversion failed: {0}")]
     ConversionFailed(String),
 }

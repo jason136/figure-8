@@ -9,9 +9,13 @@ edition = "2024"
 
 [dependencies]
 figure-8-macros = { path = "figure-8-macros" }
+
 tokio = { version = "1", features = ["full"] }
 v8 = "146"
-headless_chrome = "1.0"
+chromiumoxide = "0.9"
 
+flume = "0.12"
+base64 = "0.22"
+futures = "0.3"
 serde_json = "1"
 thiserror = "2"
