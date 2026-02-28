@@ -1,21 +1,53 @@
 [workspace]
-members = ["figure-8-macros", "."]
+members = ["figure-8-macros", "figure-8", "."]
 resolver = "3"
 
 [package]
-name = "figure-8"
+name = "figure-8-bin"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-figure-8-macros = { path = "figure-8-macros" }
+[[bin]]
+name = "f8server"
+path = "src/bin/server.rs"
 
+[[bin]]
+name = "f8tui"
+path = "src/bin/tui.rs"
+required-features = ["tui"]
+
+[features]
+default = ["tui"]
+tui = ["ratatui", "crossterm", "tui-textarea"]
+
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-v8 = "146"
-chromiumoxide = "0.9"
-
 flume = "0.12"
-base64 = "0.22"
 futures = "0.3"
 serde_json = "1"
 thiserror = "2"
+
+[dependencies]
+figure-8-macros = { path = "figure-8-macros" }
+figure-8 = { path = "figure-8" }
+
+tokio = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+axum = { version = "0.8", features = ["json", "ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-tungstenite = { version = "0.28.0", features = ["connect"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+serde = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
+tui-textarea = { version = "0.7", optional = true }
+reqwest = { version = "0.13.2", default-features = false }

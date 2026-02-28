@@ -1,0 +1,16 @@
+[package]
+name = "figure-8"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+v8 = "146"
+chromiumoxide = "0.9"
+
+tokio = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+base64 = "0.22"
