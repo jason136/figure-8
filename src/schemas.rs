@@ -13,18 +13,10 @@ pub struct InstanceConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
-pub enum SuccessResponse {
-    Negotiation { capabilities: Vec<Capabilities> },
-    Execution { output: String },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result")]
 #[serde(rename_all = "snake_case")]
-pub enum StreamResponse {
-    Success(SuccessResponse),
+pub enum NegotiationResponse {
+    Success { capabilities: Vec<Capabilities> },
     Error { message: String },
 }
 
@@ -34,6 +26,10 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ExecutionResponse {
-    result: String,
+#[serde(tag = "channel")]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionResponse {
+    Stdout { message: String },
+    Stderr { message: String },
+    Error { message: String },
 }

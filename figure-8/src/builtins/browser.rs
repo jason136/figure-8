@@ -36,6 +36,18 @@ impl Browser {
             .map_err(|e| ToolError::custom(e.to_string()))
     }
 
+    pub fn default_tools(&self) -> Vec<ToolDef> {
+        vec![
+            goto(self.clone()),
+            click(self.clone()),
+            type_into(self.clone()),
+            get_text(self.clone()),
+            get_html(self.clone()),
+            screenshot(self.clone()),
+            eval(self.clone()),
+        ]
+    }
+
     async fn ensure_page(&self) -> Result<Arc<Page>, ToolError> {
         match &*self.inner.read().await {
             BrowserInner::Pending(config) => {
@@ -75,18 +87,17 @@ impl Browser {
 }
 
 pub fn shutdown(handle: Browser) -> ToolDef {
-    tool_async!("shutdown", "Shutdown the browser", || -> () {
+    tool_async!("page.shutdown", "Shutdown the browser", || -> () {
         let handle = handle.clone();
         async move {
             handle.shutdown_browser().await?;
             Ok::<_, ToolError>(())
         }
     })
-    .with_namespace("page")
 }
 
 pub fn goto(handle: Browser) -> ToolDef {
-    tool_async!("goto", "Navigate to a URL", |url: String| -> () {
+    tool_async!("page.goto", "Navigate to a URL", |url: String| -> () {
         let handle = handle.clone();
         async move {
             let page = handle.ensure_page().await?;
@@ -95,47 +106,46 @@ pub fn goto(handle: Browser) -> ToolDef {
             Ok::<_, ToolError>(())
         }
     })
-    .with_namespace("page")
 }
 
 pub fn click(handle: Browser) -> ToolDef {
     tool_async!(
-        "click",
+        "page.click",
         "Click an element by CSS selector",
         |selector: String| -> () {
             let handle = handle.clone();
             async move {
-                let page = handle.ensure_page().await?;
+                let page = &handle.ensure_page().await?;
                 page.find_element(&selector).await?.click().await?;
                 Ok::<_, ToolError>(())
             }
         }
     )
-    .with_namespace("page")
 }
 
 pub fn type_into(handle: Browser) -> ToolDef {
-    tool_async!("type", "Type text into an element", |selector: String,
-                                                      text: String|
-     -> () {
-        let handle = handle.clone();
-        async move {
-            let page = handle.ensure_page().await?;
-            page.find_element(&selector)
-                .await?
-                .click()
-                .await?
-                .type_str(&text)
-                .await?;
-            Ok::<_, ToolError>(())
+    tool_async!(
+        "page.type",
+        "Type text into an element",
+        |selector: String, text: String| -> () {
+            let handle = handle.clone();
+            async move {
+                let page = handle.ensure_page().await?;
+                page.find_element(&selector)
+                    .await?
+                    .click()
+                    .await?
+                    .type_str(&text)
+                    .await?;
+                Ok::<_, ToolError>(())
+            }
         }
-    })
-    .with_namespace("page")
+    )
 }
 
 pub fn get_text(handle: Browser) -> ToolDef {
     tool_async!(
-        "getText",
+        "page.getText",
         "Get inner text of an element",
         |selector: String| -> String {
             let handle = handle.clone();
@@ -149,37 +159,42 @@ pub fn get_text(handle: Browser) -> ToolDef {
             }
         }
     )
-    .with_namespace("page")
 }
 
 pub fn get_html(handle: Browser) -> ToolDef {
-    tool_async!("getHtml", "Get the full HTML of the page", || -> String {
-        let handle = handle.clone();
-        async move { Ok::<_, ToolError>(handle.ensure_page().await?.content().await?) }
-    })
-    .with_namespace("page")
+    tool_async!(
+        "page.getHtml",
+        "Get the full HTML of the page",
+        || -> String {
+            let handle = handle.clone();
+            async move { Ok::<_, ToolError>(handle.ensure_page().await?.content().await?) }
+        }
+    )
 }
 
 pub fn screenshot(handle: Browser) -> ToolDef {
-    tool_async!("screenshot", "Capture a PNG screenshot as base64", || -> String {
-        let handle = handle.clone();
-        async move {
-            use base64::Engine;
-            let page = handle.ensure_page().await?;
-            let png = page.screenshot(
+    tool_async!(
+        "page.screenshot",
+        "Capture a PNG screenshot as base64",
+        || -> String {
+            let handle = handle.clone();
+            async move {
+                use base64::Engine;
+                let page = handle.ensure_page().await?;
+                let png = page.screenshot(
                 chromiumoxide::page::ScreenshotParams::builder()
                     .format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Png)
                     .build(),
             ).await?;
-            Ok::<_, ToolError>(base64::engine::general_purpose::STANDARD.encode(&png))
+                Ok::<_, ToolError>(base64::engine::general_purpose::STANDARD.encode(&png))
+            }
         }
-    })
-    .with_namespace("page")
+    )
 }
 
 pub fn eval(handle: Browser) -> ToolDef {
     tool_async!(
-        "eval",
+        "page.eval",
         "Evaluate JavaScript in the browser page",
         |code: String| -> String {
             let handle = handle.clone();
@@ -190,12 +205,11 @@ pub fn eval(handle: Browser) -> ToolDef {
             }
         }
     )
-    .with_namespace("page")
 }
 
 pub fn wait_for(handle: Browser) -> ToolDef {
     tool_async!(
-        "waitFor",
+        "page.waitFor",
         "Wait for an element matching a CSS selector",
         |selector: String| -> () {
             let handle = handle.clone();
@@ -205,12 +219,11 @@ pub fn wait_for(handle: Browser) -> ToolDef {
             }
         }
     )
-    .with_namespace("page")
 }
 
 pub fn get_title(handle: Browser) -> ToolDef {
     tool_async!(
-        "getTitle",
+        "page.getTitle",
         "Get the title of the current page",
         || -> String {
             let handle = handle.clone();
@@ -224,22 +237,4 @@ pub fn get_title(handle: Browser) -> ToolDef {
             }
         }
     )
-    .with_namespace("page")
-}
-
-/// Register all Chrome page tools on an InterfaceBuilder.
-pub fn register_tools(
-    builder: crate::InterfaceBuilder,
-    handle: &Browser,
-) -> crate::InterfaceBuilder {
-    builder
-        .tool(goto(handle.clone()))
-        .tool(click(handle.clone()))
-        .tool(type_into(handle.clone()))
-        .tool(get_text(handle.clone()))
-        .tool(get_html(handle.clone()))
-        .tool(screenshot(handle.clone()))
-        .tool(eval(handle.clone()))
-        .tool(wait_for(handle.clone()))
-        .tool(get_title(handle.clone()))
 }

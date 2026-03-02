@@ -1,53 +1,105 @@
 use std::collections::HashMap;
 
-use crate::sandbox::tool::{PendingQueue, ToolDef, ToolHandler};
+use crate::{
+    ToolError, TsType,
+    sandbox::tool::{PendingQueue, ToolDef, ToolHandler},
+};
 
 pub(crate) struct InjectedToolData {
     tool: ToolDef,
     pending: *const PendingQueue,
 }
 
+#[derive(Default)]
+struct Node {
+    tools: HashMap<String, ToolDef>,
+    children: HashMap<String, Node>,
+}
+
+#[derive(Default)]
 pub struct Interface {
-    pub name: String,
-    pub tools: Vec<ToolDef>,
+    root: Node,
 }
 
 impl Interface {
-    pub fn builder(name: impl Into<String>) -> InterfaceBuilder {
-        InterfaceBuilder {
-            name: name.into(),
-            tools: Vec::new(),
+    pub fn from_tools(tools: impl IntoIterator<Item = ToolDef>) -> Result<Self, ToolError> {
+        let mut interface = Self::default();
+        for tool in tools {
+            interface.push(tool)?;
         }
+
+        Ok(interface)
+    }
+
+    pub fn extend(&mut self, other: impl IntoIterator<Item = ToolDef>) -> Result<(), ToolError> {
+        for tool in other {
+            self.push(tool)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn push(&mut self, tool: ToolDef) -> Result<(), ToolError> {
+        let parts = tool.name.split('.').collect::<Vec<_>>();
+        let func_name = *parts.last().unwrap();
+
+        let node = parts[..parts.len() - 1]
+            .iter()
+            .fold(&mut self.root, |node, part| {
+                node.children.entry(part.to_string()).or_default()
+            });
+
+        if node.tools.contains_key(func_name) {
+            return Err(ToolError::NameCollision(
+                tool.name.clone(),
+                func_name.to_string(),
+            ));
+        }
+        node.tools.insert(func_name.to_string(), tool);
+
+        Ok(())
     }
 
     pub fn generate_dts(&self) -> String {
-        let (globals, namespaces) = self.tools.iter().fold(
-            (Vec::new(), HashMap::<&str, Vec<&str>>::new()),
-            |(mut globals, mut namespaces), tool| {
-                if let Some(ns) = tool.namespace.as_ref() {
-                    namespaces.entry(ns).or_default().push(&tool.ts_declaration);
+        fn render(node: &Node, indent: usize, is_root: bool) -> String {
+            let pad = "  ".repeat(indent);
+            let mut out = String::new();
+
+            for (leaf_name, tool) in &node.tools {
+                let params = tool
+                    .params
+                    .iter()
+                    .map(|(name, ty)| match ty {
+                        TsType::Optional(inner) => format!("{name}?: {inner}"),
+                        _ => format!("{name}: {ty}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                if is_root {
+                    out.push_str(&format!(
+                        "{pad}declare function {leaf_name}({params}): {};\n",
+                        tool.ret
+                    ));
                 } else {
-                    globals.push(tool.ts_declaration.as_str());
+                    out.push_str(&format!("{pad}{leaf_name}({params}): {};\n", tool.ret));
                 }
+            }
 
-                (globals, namespaces)
-            },
-        );
+            for (name, child) in &node.children {
+                if is_root {
+                    out.push_str(&format!("{pad}declare const {name}: {{\n"));
+                } else {
+                    out.push_str(&format!("{pad}{name}: {{\n"));
+                }
+                out.push_str(&render(child, indent + 1, false));
+                out.push_str(&format!("{pad}}};\n"));
+            }
 
-        let mut dts = globals.join("\n");
-        if !globals.is_empty() {
-            dts.push('\n');
+            out
         }
 
-        namespaces.iter().fold(dts, |mut dts, (ns, decls)| {
-            dts.push_str(&format!("declare const {ns}: {{\n"));
-            for decl in decls {
-                let method = decl.strip_prefix("declare function ").unwrap_or(decl);
-                dts.push_str(&format!("  {method}\n"));
-            }
-            dts.push_str("};\n");
-            dts
-        })
+        render(&self.root, 0, true)
     }
 
     pub(crate) fn inject(
@@ -56,30 +108,14 @@ impl Interface {
         global: v8::Local<v8::Object>,
         pending: *const PendingQueue,
     ) -> Vec<*mut InjectedToolData> {
-        let mut ns_objects: HashMap<String, v8::Local<v8::Object>> = HashMap::new();
-        self.tools
-            .into_iter()
-            .map(|tool| {
-                let key = v8::String::new(scope, &tool.name).unwrap();
+        let mut ptrs = Vec::new();
+        let mut stack = vec![(self.root, global)];
 
-                let target = tool
-                    .namespace
-                    .as_ref()
-                    .map(|ns| {
-                        ns_objects.entry(ns.clone()).or_insert_with(|| {
-                            let obj = v8::Object::new(scope);
-                            let key = v8::String::new(scope, ns).unwrap();
-                            global.set(scope, key.into(), obj.into());
-
-                            obj
-                        });
-
-                        *ns_objects.get(ns.as_str()).unwrap()
-                    })
-                    .unwrap_or(global);
+        while let Some((node, target)) = stack.pop() {
+            for (func_name, tool) in node.tools {
+                let key = v8::String::new(scope, &func_name).unwrap();
 
                 let data = Box::into_raw(Box::new(InjectedToolData { tool, pending }));
-
                 let external = v8::External::new(scope, data as *mut std::ffi::c_void);
                 let func = v8::Function::builder(tool_callback)
                     .data(external.into())
@@ -87,10 +123,18 @@ impl Interface {
                     .unwrap();
 
                 target.set(scope, key.into(), func.into());
+                ptrs.push(data);
+            }
 
-                data
-            })
-            .collect()
+            for (name, child) in node.children {
+                let obj = v8::Object::new(scope);
+                let key = v8::String::new(scope, &name).unwrap();
+                target.set(scope, key.into(), obj.into());
+                stack.push((child, obj));
+            }
+        }
+
+        ptrs
     }
 }
 
@@ -112,25 +156,6 @@ fn tool_callback(
         ToolHandler::Sync(cb) => cb(scope, args, rv),
         ToolHandler::Async(cb) => {
             cb(scope, args, rv, unsafe { &*data.pending });
-        }
-    }
-}
-
-pub struct InterfaceBuilder {
-    name: String,
-    tools: Vec<ToolDef>,
-}
-
-impl InterfaceBuilder {
-    pub fn tool(mut self, tool: ToolDef) -> Self {
-        self.tools.push(tool);
-        self
-    }
-
-    pub fn build(self) -> Interface {
-        Interface {
-            name: self.name,
-            tools: self.tools,
         }
     }
 }

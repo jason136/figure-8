@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
 use crate::ToV8;
+use crate::sandbox::marshal::TsType;
 
 pub type SyncCallback = Box<
     dyn Fn(&mut v8::PinScope<'_, '_>, v8::FunctionCallbackArguments, v8::ReturnValue) + Send + Sync,
@@ -42,16 +43,9 @@ pub type PendingQueue = RefCell<VecDeque<PendingPromise>>;
 pub struct ToolDef {
     pub name: String,
     pub description: String,
-    pub ts_declaration: String,
-    pub namespace: Option<String>,
+    pub params: Vec<(String, TsType)>,
+    pub ret: TsType,
     pub handler: ToolHandler,
-}
-
-impl ToolDef {
-    pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
-        self.namespace = Some(ns.into());
-        self
-    }
 }
 
 #[macro_use]
@@ -64,25 +58,18 @@ pub mod macros {
         ($name:literal, $desc:literal,
         |$($param:ident : $ty:ty),* $(,)?| -> $ret:ty $body:block
         ) => {{
-            let ts_declaration = {
-                #[allow(unused_mut)]
-                let mut parts: Vec<String> = Vec::new();
-                $({
-                    let ts = <$ty as $crate::TsTyped>::ts_type();
-                    parts.push(match &ts {
-                        $crate::TsType::Optional(inner) => format!("{}?: {}", stringify!($param), inner),
-                        _ => format!("{}: {}", stringify!($param), ts),
-                    });
-                })*
-                let ret_ts = <$ret as $crate::TsTyped>::ts_type();
-                format!("declare function {}({}): {};", $name, parts.join(", "), ret_ts)
-            };
+            #[allow(unused_mut)]
+            let mut params: Vec<(String, $crate::TsType)> = Vec::new();
+            $({
+                params.push((stringify!($param).to_string(), <$ty as $crate::TsTyped>::ts_type()));
+            })*
+            let ret = <$ret as $crate::TsTyped>::ts_type();
 
             $crate::sandbox::tool::ToolDef {
                 name: $name.into(),
                 description: $desc.into(),
-                ts_declaration,
-                namespace: None,
+                params,
+                ret,
                 handler: $crate::sandbox::tool::ToolHandler::Sync(
                     Box::new(move |scope, args, mut rv| {
                         #[allow(unused)]
@@ -92,6 +79,7 @@ pub mod macros {
                                 .unwrap_or_else(|e| panic!("{}: arg '{}': {}", $name, stringify!($param), e));
                             __i += 1;
                         )*
+                        #[allow(clippy::redundant_closure_call)]
                         let result: Result<$ret, $crate::ToolError> = (|| $body)();
                         match result {
                             Ok(val) => rv.set($crate::ToV8::to_v8(&val, scope)),
@@ -114,25 +102,18 @@ pub mod macros {
         ($name:literal, $desc:literal,
         |$($param:ident : $ty:ty),* $(,)?| -> $ret:ty $body:block
         ) => {{
-            let ts_declaration = {
-                #[allow(unused_mut)]
-                let mut parts: Vec<String> = Vec::new();
-                $({
-                    let ts = <$ty as $crate::TsTyped>::ts_type();
-                    parts.push(match &ts {
-                        $crate::TsType::Optional(inner) => format!("{}?: {}", stringify!($param), inner),
-                        _ => format!("{}: {}", stringify!($param), ts),
-                    });
-                })*
-                let ret_ts = <$ret as $crate::TsTyped>::ts_type();
-                format!("declare function {}({}): Promise<{}>;", $name, parts.join(", "), ret_ts)
-            };
+            #[allow(unused_mut)]
+            let mut params: Vec<(String, $crate::TsType)> = Vec::new();
+            $({
+                params.push((stringify!($param).to_string(), <$ty as $crate::TsTyped>::ts_type()));
+            })*
+            let ret = $crate::TsType::Promise(Box::new(<$ret as $crate::TsTyped>::ts_type()));
 
             $crate::sandbox::tool::ToolDef {
                 name: $name.into(),
                 description: $desc.into(),
-                ts_declaration,
-                namespace: None,
+                params,
+                ret,
                 handler: $crate::sandbox::tool::ToolHandler::Async(
                     Box::new(move |scope, args, mut rv, pending| {
                         #[allow(unused)]
@@ -168,10 +149,13 @@ pub mod macros {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("serialization error: {0}")]
+    #[error("tool names and namespaces must not collide, found '{0}' and '{1}'")]
+    NameCollision(String, String),
+
+    #[error("{0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("browser error: {0}")]
+    #[error("{0}")]
     Browser(#[from] chromiumoxide::error::CdpError),
 
     #[error("{0}")]

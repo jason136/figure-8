@@ -1,7 +1,4 @@
-use figure_8::{
-    Interface, Sandbox,
-    browser::{Browser, register_tools},
-};
+use figure_8::{Interface, Sandbox, builtins::browser::Browser};
 
 use crate::schemas::Capabilities;
 
@@ -20,27 +17,25 @@ pub struct InstanceState {
 
 impl InstanceState {
     pub fn new(capabilities: &[Capabilities]) -> Result<Self, Error> {
-        let (capability_handles, interface_builder) = capabilities.iter().try_fold(
-            (
-                CapabilityHandles::default(),
-                Interface::builder("execution"),
-            ),
-            |(mut handles, builder), capability| {
-                let builder = match capability {
+        let (capability_handles, interface) = capabilities.iter().try_fold(
+            (CapabilityHandles::default(), Interface::default()),
+            |(mut handles, mut interface), capability| {
+                match capability {
                     Capabilities::Browser => {
                         if handles.browser.is_none() {
-                            handles.browser = Some(Browser::new(Browser::default_config()?));
+                            let browser = Browser::new(Browser::default_config()?);
+                            interface.extend(browser.default_tools())?;
+                            handles.browser = Some(browser);
                         }
-                        register_tools(builder, handles.browser.as_ref().unwrap())
                     }
                 };
 
-                Ok::<_, Error>((handles, builder))
+                Ok::<_, Error>((handles, interface))
             },
         )?;
 
         Ok(InstanceState {
-            sandbox: Sandbox::new(interface_builder.build()),
+            sandbox: Sandbox::new(interface)?,
             handles: capability_handles,
         })
     }

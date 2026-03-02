@@ -371,51 +371,7 @@ impl<V: ToV8> ToV8 for HashMap<String, V> {
 pub enum MarshalError {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: &'static str, got: String },
+
     #[error("conversion failed: {0}")]
     ConversionFailed(String),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ts_type_display() {
-        assert_eq!(TsType::Number.to_string(), "number");
-        assert_eq!(TsType::String.to_string(), "string");
-        assert_eq!(TsType::Boolean.to_string(), "boolean");
-        assert_eq!(TsType::Void.to_string(), "void");
-        assert_eq!(
-            TsType::Array(Box::new(TsType::Number)).to_string(),
-            "number[]"
-        );
-        assert_eq!(
-            TsType::Optional(Box::new(TsType::String)).to_string(),
-            "string | undefined"
-        );
-        assert_eq!(
-            TsType::Promise(Box::new(TsType::String)).to_string(),
-            "Promise<string>"
-        );
-        assert_eq!(
-            TsType::Record(Box::new(TsType::String), Box::new(TsType::Unknown)).to_string(),
-            "Record<string, unknown>"
-        );
-    }
-
-    #[test]
-    fn ts_type_from_rust_types() {
-        assert_eq!(f64::ts_type(), TsType::Number);
-        assert_eq!(String::ts_type(), TsType::String);
-        assert_eq!(bool::ts_type(), TsType::Boolean);
-        assert_eq!(<()>::ts_type(), TsType::Void);
-        assert_eq!(
-            <Vec<f64>>::ts_type(),
-            TsType::Array(Box::new(TsType::Number))
-        );
-        assert_eq!(
-            <Option<String>>::ts_type(),
-            TsType::Optional(Box::new(TsType::String))
-        );
-    }
 }

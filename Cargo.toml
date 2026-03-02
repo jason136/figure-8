@@ -1,5 +1,5 @@
 [workspace]
-members = ["figure-8-macros", "figure-8", "."]
+members = ["figure-8", "."]
 resolver = "3"
 
 [package]
@@ -28,7 +28,6 @@ serde_json = "1"
 thiserror = "2"
 
 [dependencies]
-figure-8-macros = { path = "figure-8-macros" }
 figure-8 = { path = "figure-8" }
 
 tokio = { workspace = true }

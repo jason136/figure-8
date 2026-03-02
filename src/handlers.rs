@@ -1,14 +1,18 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{State, WebSocketUpgrade, ws::Message},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use futures::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio::{select, sync::Mutex};
 
 use crate::{
     Error, InstanceState,
-    schemas::{ExecutionRequest, InstanceConfig, StreamResponse, SuccessResponse},
+    schemas::{ExecutionRequest, ExecutionResponse, InstanceConfig, NegotiationResponse},
 };
 
 #[derive(Clone)]
@@ -25,51 +29,90 @@ pub async fn health() -> impl IntoResponse {
 
 #[axum::debug_handler]
 pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) -> Response {
-    ws.on_upgrade(move |mut socket| async move {
+    ws.on_upgrade(move |socket| async move {
         let mut instance_state: Option<InstanceState> = None;
+        let (tx, mut rx) = socket.split();
+        let tx = Arc::new(Mutex::new(tx));
 
-        while let Some(Ok(message)) = socket.recv().await {
+        while let Some(Ok(message)) = rx.next().await {
             let msg_bytes = match message {
                 Message::Text(ref text) => text.as_bytes(),
                 Message::Binary(ref binary) => binary.as_ref(),
                 Message::Ping(ping) => {
-                    let _ = socket.send(Message::Pong(ping)).await;
+                    let _ = tx.lock().await.send(Message::Pong(ping)).await;
                     continue;
                 }
                 Message::Pong(pong) => {
-                    let _ = socket.send(Message::Ping(pong)).await;
+                    let _ = tx.lock().await.send(Message::Ping(pong)).await;
                     continue;
                 }
                 Message::Close(_) => break,
             };
 
-            let Ok(response) = async {
-                let success = if let Some(instance_state) = &mut instance_state {
+            if let Err(e) = async {
+                if let Some(instance_state) = &mut instance_state {
                     let ExecutionRequest { code } = serde_json::from_slice(msg_bytes)?;
 
-                    let output = instance_state.sandbox.execute(&code).await?;
-
-                    Ok::<_, Error>(SuccessResponse::Execution { output })
+                    instance_state.sandbox.execute(&code).await?;
                 } else {
                     let InstanceConfig { capabilities } = serde_json::from_slice(msg_bytes)?;
 
-                    instance_state = Some(InstanceState::new(&capabilities)?);
+                    let instance = InstanceState::new(&capabilities)?;
 
-                    Ok::<_, Error>(SuccessResponse::Negotiation { capabilities })
-                }?;
+                    let stdout_tx = instance.sandbox.stdout.clone();
+                    let stderr_tx = instance.sandbox.stderr.clone();
 
-                Ok::<_, Error>(serde_json::to_string(&StreamResponse::Success(success)))
+                    let tx_clone = tx.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let message = select! {
+                                Ok(msg) = stdout_tx.recv_async() => {
+                                    serde_json::to_string(&ExecutionResponse::Stdout {
+                                        message: msg,
+                                    })
+                                    .unwrap()
+                                }
+                                Ok(msg) = stderr_tx.recv_async() => {
+                                    serde_json::to_string(&ExecutionResponse::Stderr {
+                                        message: msg,
+                                    })
+                                    .unwrap()
+                                }
+                                else => return,
+                            };
+
+                            let _ = tx_clone
+                                .lock()
+                                .await
+                                .send(Message::Text(message.into()))
+                                .await;
+                        }
+                    });
+
+                    instance_state = Some(instance);
+
+                    let _ = tx
+                        .lock()
+                        .await
+                        .send(Message::Text(
+                            serde_json::to_string(&NegotiationResponse::Success { capabilities })
+                                .unwrap()
+                                .into(),
+                        ))
+                        .await;
+                }
+
+                Ok::<_, Error>(())
             }
             .await
-            .unwrap_or_else(|e| {
-                serde_json::to_string(&StreamResponse::Error {
+            {
+                let message = serde_json::to_string(&ExecutionResponse::Error {
                     message: e.to_string(),
                 })
-            }) else {
-                continue;
-            };
+                .unwrap();
 
-            let _ = socket.send(Message::Text(response.into())).await;
+                let _ = tx.lock().await.send(Message::Text(message.into())).await;
+            }
         }
     })
 }

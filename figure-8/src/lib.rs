@@ -1,9 +1,9 @@
-pub mod browser;
+pub mod builtins;
 pub mod sandbox;
 
 pub use sandbox::{
     Sandbox, SandboxError,
-    interface::{Interface, InterfaceBuilder},
+    interface::Interface,
     marshal::{FromV8, ToV8, TsType, TsTyped},
     tool::{ToolDef, ToolError},
 };

@@ -21,10 +21,11 @@ use tui_textarea::TextArea;
 
 use figure_8_bin::{
     Error,
-    schemas::{Capabilities, ExecutionRequest, InstanceConfig, StreamResponse, SuccessResponse},
+    schemas::{Capabilities, ExecutionRequest, InstanceConfig, NegotiationResponse},
 };
 
-const CAPABILITIES: &[(&str, fn() -> Capabilities)] = &[("Browser", || Capabilities::Browser)];
+type CapabilityFn = fn() -> Capabilities;
+const CAPABILITIES: &[(&str, CapabilityFn)] = &[("Browser", || Capabilities::Browser)];
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -171,23 +172,20 @@ async fn run_tui(
 
                         if let Some(Ok(msg)) = ws_rx.next().await
                             && let Ok(text) = msg.into_text()
-                            && let Ok(stream_response) =
-                                serde_json::from_str::<StreamResponse>(&text)
+                            && let Ok(negotiation_response) =
+                                serde_json::from_str::<NegotiationResponse>(&text)
                         {
-                            match stream_response {
-                                StreamResponse::Success(SuccessResponse::Negotiation {
-                                    capabilities,
-                                }) => {
+                            match negotiation_response {
+                                NegotiationResponse::Success { capabilities } => {
                                     output.push(format!(
                                         "Negotiated capabilities: {:?}",
                                         capabilities
                                     ));
                                 }
-                                StreamResponse::Error { message } => {
+                                NegotiationResponse::Error { message } => {
                                     *error = Some(message);
                                     continue;
                                 }
-                                _ => return Ok(()),
                             }
                         }
 
