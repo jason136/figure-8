@@ -1,19 +1,25 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::sync::Once;
 
 use flume::{Receiver, Sender, unbounded};
 use tokio::sync::oneshot;
 
 use interface::Interface;
-use tool::PendingQueue;
 
-use crate::{ToolError, sandbox::inspector::Inspector};
+use crate::{
+    ToolError,
+    sandbox::{
+        inspector::{ConsoleMessage, Inspector},
+        interface::free_injected_data,
+        tool::PendingPromise,
+        transform::{globalize_namespace, prepare_repl_source},
+    },
+};
 
 pub mod inspector;
 pub mod interface;
-pub mod marshal;
+pub mod marshall;
 pub mod tool;
+pub mod transform;
 
 fn ensure_v8() {
     static V8_INIT: Once = Once::new();
@@ -32,8 +38,7 @@ pub struct SandboxCommand {
 
 pub struct Sandbox {
     command_tx: Sender<SandboxCommand>,
-    pub stdout: Receiver<String>,
-    pub stderr: Receiver<String>,
+    pub console_rx: Receiver<ConsoleMessage>,
     _handle: std::thread::JoinHandle<()>,
 }
 
@@ -41,7 +46,7 @@ impl Sandbox {
     pub fn new(interface: Interface) -> Result<Self, ToolError> {
         ensure_v8();
 
-        let (inspector, stdout, stderr) = Inspector::new();
+        let (inspector, console_rx) = Inspector::new();
 
         let (command_tx, command_rx) = unbounded();
         let tokio_handle = tokio::runtime::Handle::current();
@@ -53,8 +58,7 @@ impl Sandbox {
 
         Ok(Sandbox {
             command_tx,
-            stdout,
-            stderr,
+            console_rx,
             _handle,
         })
     }
@@ -78,8 +82,8 @@ fn spawn_isolate(interface: Interface, command_rx: Receiver<SandboxCommand>, ins
     let injected_ptrs;
     {
         let mut isolate = v8::Isolate::new(Default::default());
-        let pending = Box::new(RefCell::new(VecDeque::new()));
-        let pending_ptr: *const PendingQueue = &*pending;
+        let (pending_tx, pending_rx) = unbounded();
+        let pending_ptr: *const Sender<PendingPromise> = &pending_tx;
 
         let _inspector =
             v8::inspector::V8Inspector::create(&mut isolate, inspector.into_inspector_client());
@@ -105,28 +109,30 @@ fn spawn_isolate(interface: Interface, command_rx: Receiver<SandboxCommand>, ins
                 break;
             };
 
-            let result = execute_module(&mut isolate, &context_global, &code, &pending);
+            let result = execute_module(&mut isolate, &context_global, code, &pending_rx);
             let _ = reply.send(result);
         }
     };
 
-    unsafe { interface::free_injected_data(injected_ptrs) };
+    unsafe { free_injected_data(injected_ptrs) };
 }
 
 fn execute_module(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
-    code: &str,
-    pending: &PendingQueue,
+    code: String,
+    pending_rx: &Receiver<PendingPromise>,
 ) -> Result<String, SandboxError> {
-    let module_promise = {
+    let prepared = prepare_repl_source(code);
+
+    let (module_promise, module_global) = {
         let scope = std::pin::pin!(v8::HandleScope::new(isolate));
         let scope = &mut scope.init();
         let ctx = v8::Local::new(scope, context);
         let scope = &mut v8::ContextScope::new(scope, ctx);
 
         let filename = v8::String::new(scope, "<module>").unwrap();
-        let source_str = v8::String::new(scope, code).ok_or_else(|| {
+        let source_str = v8::String::new(scope, &prepared).ok_or_else(|| {
             SandboxError::InternalError("failed to create source string".to_string())
         })?;
 
@@ -175,20 +181,21 @@ fn execute_module(
         };
 
         let promise: v8::Local<v8::Promise> = result.try_into().unwrap();
-        v8::Global::new(tc, promise)
+        let module_global = v8::Global::new(tc, module);
+        (v8::Global::new(tc, promise), module_global)
     };
 
-    while let Some(p) = pending.borrow_mut().pop_front() {
-        let result =
-            p.rx.blocking_recv()
-                .map_err(|_| SandboxError::InternalError("tool future dropped".to_string()))?;
+    while let Ok(PendingPromise { resolver, rx }) = pending_rx.try_recv() {
+        let Ok(result) = rx.blocking_recv() else {
+            continue;
+        };
 
         let scope = std::pin::pin!(v8::HandleScope::new(isolate));
         let scope = &mut scope.init();
         let ctx = v8::Local::new(scope, context);
         let scope = &mut v8::ContextScope::new(scope, ctx);
 
-        let resolver = v8::Local::new(scope, &p.resolver);
+        let resolver = v8::Local::new(scope, &resolver);
         match result {
             Ok(value) => {
                 let val = value.to_v8(scope);
@@ -210,7 +217,11 @@ fn execute_module(
     let promise = v8::Local::new(scope, module_promise);
 
     match promise.state() {
-        v8::PromiseState::Fulfilled => Ok(promise.result(scope).to_rust_string_lossy(scope)),
+        v8::PromiseState::Fulfilled => {
+            let module = v8::Local::new(scope, module_global);
+            globalize_namespace(scope, module);
+            Ok(promise.result(scope).to_rust_string_lossy(scope))
+        }
         v8::PromiseState::Rejected => Err(SandboxError::JsError(
             promise.result(scope).to_rust_string_lossy(scope),
         )),

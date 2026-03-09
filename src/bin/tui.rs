@@ -21,11 +21,12 @@ use tui_textarea::TextArea;
 
 use figure_8_bin::{
     Error,
-    schemas::{Capabilities, ExecutionRequest, InstanceConfig, NegotiationResponse},
+    schemas::{
+        BrowserCapability, Capabilities, ExecutionRequest, McpCapability, NegotiationResponse,
+    },
 };
 
-type CapabilityFn = fn() -> Capabilities;
-const CAPABILITIES: &[(&str, CapabilityFn)] = &[("Browser", || Capabilities::Browser)];
+const CAPABILITIES: &[&str] = &["Browser"];
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -58,6 +59,8 @@ async fn main() -> Result<(), Error> {
         cursor: 0,
         list_state,
         error: None,
+        mcp_servers: Vec::new(),
+        mcp_input: None,
     };
 
     let result = run_tui(&mut terminal, screen, &args.url).await;
@@ -85,6 +88,8 @@ enum TuiState {
         cursor: usize,
         list_state: ListState,
         error: Option<String>,
+        mcp_servers: Vec<String>,
+        mcp_input: Option<Box<TextArea<'static>>>,
     },
     Editor {
         textarea: Box<TextArea<'static>>,
@@ -106,8 +111,17 @@ async fn run_tui(
                 selected,
                 list_state,
                 error,
+                mcp_servers,
+                mcp_input,
                 ..
-            } => draw_capability_select(f, selected, list_state, error.as_deref()),
+            } => draw_capability_select(
+                f,
+                selected,
+                mcp_servers,
+                list_state,
+                error.as_deref(),
+                mcp_input.as_deref_mut(),
+            ),
             TuiState::Editor {
                 textarea,
                 mode,
@@ -122,6 +136,8 @@ async fn run_tui(
                 cursor,
                 list_state,
                 error,
+                mcp_servers,
+                mcp_input,
             } => {
                 if !event::poll(std::time::Duration::from_millis(50))? {
                     continue;
@@ -133,75 +149,112 @@ async fn run_tui(
                     continue;
                 }
 
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Up => {
-                        if *cursor > 0 {
-                            *cursor -= 1;
-                            list_state.select(Some(*cursor));
-                        }
-                    }
-                    KeyCode::Down => {
-                        if *cursor + 1 < CAPABILITIES.len() {
-                            *cursor += 1;
-                            list_state.select(Some(*cursor));
-                        }
-                    }
-                    KeyCode::Char(' ') => {
-                        selected[*cursor] = !selected[*cursor];
-                    }
-                    KeyCode::Enter => {
-                        *error = None;
-
-                        let capabilities = selected
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, s)| s.then_some((CAPABILITIES[i].1)()))
-                            .collect::<Vec<_>>();
-
-                        let config = InstanceConfig { capabilities };
-
-                        let (ws_stream, _) = tokio_tungstenite::connect_async(url).await?;
-
-                        let (mut ws_tx, mut ws_rx) = ws_stream.split();
-
-                        let negotiation = serde_json::to_string(&config).unwrap();
-                        ws_tx.send(Message::Text(negotiation.into())).await?;
-
-                        let mut output = Vec::new();
-
-                        if let Some(Ok(msg)) = ws_rx.next().await
-                            && let Ok(text) = msg.into_text()
-                            && let Ok(negotiation_response) =
-                                serde_json::from_str::<NegotiationResponse>(&text)
-                        {
-                            match negotiation_response {
-                                NegotiationResponse::Success { capabilities } => {
-                                    output.push(format!(
-                                        "Negotiated capabilities: {:?}",
-                                        capabilities
-                                    ));
+                if mcp_input.is_some() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if let Some(input) = mcp_input.take() {
+                                let server_url = input.lines().join("");
+                                if !server_url.trim().is_empty() {
+                                    mcp_servers.push(server_url.trim().to_string());
                                 }
-                                NegotiationResponse::Error { message } => {
-                                    *error = Some(message);
-                                    continue;
-                                }
+                                let total = CAPABILITIES.len() + mcp_servers.len() + 1;
+                                *cursor = total - 1;
+                                list_state.select(Some(*cursor));
                             }
                         }
-
-                        let mut textarea = TextArea::default();
-                        textarea.set_block(Block::bordered().title(" Editor"));
-                        textarea.set_cursor_line_style(Style::default());
-
-                        screen = TuiState::Editor {
-                            textarea: Box::new(textarea),
-                            mode: Mode::Edit,
-                            output,
-                            ws_tx,
-                            ws_rx,
-                        };
+                        KeyCode::Esc => {
+                            *mcp_input = None;
+                        }
+                        _ => {
+                            if let Some(input) = mcp_input.as_mut() {
+                                input.input(Event::Key(key));
+                            }
+                        }
                     }
-                    _ => {}
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Up => {
+                            if *cursor > 0 {
+                                *cursor -= 1;
+                                list_state.select(Some(*cursor));
+                            }
+                        }
+                        KeyCode::Down => {
+                            let total = CAPABILITIES.len() + mcp_servers.len() + 1;
+                            if *cursor + 1 < total {
+                                *cursor += 1;
+                                list_state.select(Some(*cursor));
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            let add_idx = CAPABILITIES.len() + mcp_servers.len();
+                            if *cursor < CAPABILITIES.len() {
+                                selected[*cursor] = !selected[*cursor];
+                            } else if *cursor < add_idx {
+                                mcp_servers.remove(*cursor - CAPABILITIES.len());
+                                let total = CAPABILITIES.len() + mcp_servers.len() + 1;
+                                if *cursor >= total {
+                                    *cursor = total - 1;
+                                }
+                                list_state.select(Some(*cursor));
+                            } else {
+                                let mut input = TextArea::default();
+                                input.set_block(Block::bordered().title(" Server URL "));
+                                input.set_cursor_line_style(Style::default());
+                                *mcp_input = Some(Box::new(input));
+                            }
+                        }
+                        KeyCode::Enter => {
+                            *error = None;
+
+                            let capabilities = Capabilities {
+                                browser: selected[0].then_some(BrowserCapability {}),
+                                mcp: mcp_servers
+                                    .iter()
+                                    .map(|s| McpCapability { server: s.clone() })
+                                    .collect(),
+                            };
+
+                            let (ws_stream, _) = tokio_tungstenite::connect_async(url).await?;
+
+                            let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+                            let negotiation = serde_json::to_string(&capabilities).unwrap();
+                            ws_tx.send(Message::Text(negotiation.into())).await?;
+
+                            let mut output = Vec::new();
+
+                            if let Some(Ok(msg)) = ws_rx.next().await
+                                && let Ok(text) = msg.into_text()
+                                && let Ok(negotiation_response) =
+                                    serde_json::from_str::<NegotiationResponse>(&text)
+                            {
+                                match negotiation_response {
+                                    NegotiationResponse::Success => {
+                                        output.push("Connected successfully".to_string());
+                                    }
+                                    NegotiationResponse::Error { message } => {
+                                        *error = Some(message);
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let mut textarea = TextArea::default();
+                            textarea.set_block(Block::bordered().title(" Editor"));
+                            textarea.set_cursor_line_style(Style::default());
+
+                            screen = TuiState::Editor {
+                                textarea: Box::new(textarea),
+                                mode: Mode::Edit,
+                                output,
+                                ws_tx,
+                                ws_rx,
+                            };
+                        }
+                        _ => {}
+                    }
                 }
             }
             TuiState::Editor {
@@ -275,14 +328,18 @@ async fn run_tui(
 fn draw_capability_select(
     f: &mut Frame,
     selected: &[bool],
+    mcp_servers: &[String],
     list_state: &mut ListState,
     error: Option<&str>,
+    mcp_input: Option<&mut TextArea>,
 ) {
     let error_height = if error.is_some() { 3 } else { 0 };
+    let input_height: u16 = if mcp_input.is_some() { 3 } else { 0 };
+    let total_items = CAPABILITIES.len() + mcp_servers.len() + 1;
 
     let [_, center, _] = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Max(CAPABILITIES.len() as u16 + 6 + error_height),
+        Constraint::Max(total_items as u16 + 6 + error_height + input_height),
         Constraint::Fill(1),
     ])
     .areas(f.area());
@@ -294,9 +351,10 @@ fn draw_capability_select(
     ])
     .areas(center);
 
-    let [title_area, list_area, error_area, help_area] = Layout::vertical([
+    let [title_area, list_area, input_area, error_area, help_area] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(3),
+        Constraint::Length(input_height),
         Constraint::Length(error_height),
         Constraint::Length(2),
     ])
@@ -307,20 +365,30 @@ fn draw_capability_select(
         title_area,
     );
 
-    let items = CAPABILITIES
-        .iter()
-        .enumerate()
-        .map(|(i, (name, _))| {
-            let check = if selected[i] { "[x]" } else { "[ ]" };
-            ListItem::new(format!("  {} {}", check, name))
-        })
-        .collect::<Vec<_>>();
+    let mut items = Vec::new();
+
+    for (i, name) in CAPABILITIES.iter().enumerate() {
+        let check = if selected[i] { "[x]" } else { "[ ]" };
+        items.push(ListItem::new(format!("  {} {}", check, name)));
+    }
+
+    for server in mcp_servers {
+        items.push(ListItem::new(format!("  [mcp] {}", server)));
+    }
+
+    items.push(ListItem::new("  [+] Add MCP Server..."));
 
     let list = List::new(items)
         .block(Block::bordered())
         .highlight_style(Style::new().yellow().bold());
 
     f.render_stateful_widget(list, list_area, list_state);
+
+    let is_input_mode = mcp_input.is_some();
+
+    if let Some(input) = mcp_input {
+        f.render_widget(&*input, input_area);
+    }
 
     if let Some(err) = error {
         f.render_widget(
@@ -331,18 +399,25 @@ fn draw_capability_select(
         );
     }
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
+    let help = if is_input_mode {
+        Line::from(vec![
+            "Enter".green(),
+            ": add  |  ".into(),
+            "Esc".green(),
+            ": cancel".into(),
+        ])
+    } else {
+        Line::from(vec![
             "Space".green(),
             ": toggle  |  ".into(),
             "Enter".green(),
             ": connect  |  ".into(),
             "q".green(),
             ": quit".into(),
-        ]))
-        .centered(),
-        help_area,
-    );
+        ])
+    };
+
+    f.render_widget(Paragraph::new(help).centered(), help_area);
 }
 
 fn draw_editor(f: &mut Frame, textarea: &mut TextArea, mode: &Mode, output: &[String]) {

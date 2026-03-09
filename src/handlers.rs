@@ -12,7 +12,7 @@ use tokio::{select, sync::Mutex};
 
 use crate::{
     Error, InstanceState,
-    schemas::{ExecutionRequest, ExecutionResponse, InstanceConfig, NegotiationResponse},
+    schemas::{ExecutionRequest, ExecutionResponse, NegotiationResponse},
 };
 
 #[derive(Clone)]
@@ -55,31 +55,22 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
 
                     instance_state.sandbox.execute(&code).await?;
                 } else {
-                    let InstanceConfig { capabilities } = serde_json::from_slice(msg_bytes)?;
+                    let capabilities = serde_json::from_slice(msg_bytes)?;
 
-                    let instance = InstanceState::new(&capabilities)?;
+                    let instance = InstanceState::new(&capabilities).await?;
 
-                    let stdout_tx = instance.sandbox.stdout.clone();
-                    let stderr_tx = instance.sandbox.stderr.clone();
+                    let console_rx = instance.sandbox.console_rx.clone();
 
                     let tx_clone = tx.clone();
                     tokio::spawn(async move {
                         loop {
-                            let message = select! {
-                                Ok(msg) = stdout_tx.recv_async() => {
-                                    serde_json::to_string(&ExecutionResponse::Stdout {
-                                        message: msg,
-                                    })
-                                    .unwrap()
-                                }
-                                Ok(msg) = stderr_tx.recv_async() => {
-                                    serde_json::to_string(&ExecutionResponse::Stderr {
-                                        message: msg,
-                                    })
-                                    .unwrap()
-                                }
-                                else => return,
+                            let Ok(message) = console_rx.recv_async().await else {
+                                return;
                             };
+
+                            let message =
+                                serde_json::to_string(&ExecutionResponse::Console { message })
+                                    .unwrap();
 
                             let _ = tx_clone
                                 .lock()
@@ -95,7 +86,7 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
                         .lock()
                         .await
                         .send(Message::Text(
-                            serde_json::to_string(&NegotiationResponse::Success { capabilities })
+                            serde_json::to_string(&NegotiationResponse::Success)
                                 .unwrap()
                                 .into(),
                         ))

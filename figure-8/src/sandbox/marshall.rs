@@ -29,6 +29,7 @@ pub enum TsType {
     Optional(Box<TsType>),
     Promise(Box<TsType>),
     Record(Box<TsType>, Box<TsType>),
+    Object(Vec<(String, TsType)>),
 }
 
 impl fmt::Display for TsType {
@@ -43,6 +44,15 @@ impl fmt::Display for TsType {
             TsType::Optional(inner) => write!(f, "{inner} | undefined"),
             TsType::Promise(inner) => write!(f, "Promise<{inner}>"),
             TsType::Record(k, v) => write!(f, "Record<{k}, {v}>"),
+            TsType::Object(fields) => write!(
+                f,
+                "{{ {} }}",
+                fields
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {ty}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -104,6 +114,53 @@ impl TsTyped for serde_json::Value {
 impl<V: TsTyped> TsTyped for HashMap<String, V> {
     fn ts_type() -> TsType {
         TsType::Record(Box::new(TsType::String), Box::new(V::ts_type()))
+    }
+}
+
+pub fn json_schema_ts_type(schema: &serde_json::Map<String, serde_json::Value>) -> TsType {
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("string") => TsType::String,
+        Some("number") | Some("integer") => TsType::Number,
+        Some("boolean") => TsType::Boolean,
+        Some("array") => {
+            let inner = schema
+                .get("items")
+                .and_then(|v| v.as_object())
+                .map(json_schema_ts_type)
+                .unwrap_or(TsType::Unknown);
+
+            TsType::Array(Box::new(inner))
+        }
+        Some("object") => {
+            let Some(properties) = schema.get("properties").and_then(|v| v.as_object()) else {
+                return TsType::Record(Box::new(TsType::String), Box::new(TsType::Unknown));
+            };
+
+            let required = schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            let fields = properties
+                .into_iter()
+                .map(|(name, prop_schema)| {
+                    let ts_type = prop_schema
+                        .as_object()
+                        .map(json_schema_ts_type)
+                        .unwrap_or(TsType::Unknown);
+
+                    if required.contains(&name.as_str()) {
+                        (name.clone(), ts_type)
+                    } else {
+                        (name.clone(), TsType::Optional(Box::new(ts_type)))
+                    }
+                })
+                .collect();
+
+            TsType::Object(fields)
+        }
+        _ => TsType::Unknown,
     }
 }
 

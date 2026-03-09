@@ -1,18 +1,20 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
-
+use flume::Sender;
 use tokio::sync::oneshot;
 
 use crate::ToV8;
-use crate::sandbox::marshal::TsType;
+use crate::sandbox::marshall::TsType;
 
 pub type SyncCallback = Box<
     dyn Fn(&mut v8::PinScope<'_, '_>, v8::FunctionCallbackArguments, v8::ReturnValue) + Send + Sync,
 >;
 
 pub type AsyncCallback = Box<
-    dyn Fn(&mut v8::PinScope<'_, '_>, v8::FunctionCallbackArguments, v8::ReturnValue, &PendingQueue)
-        + Send
+    dyn Fn(
+            &mut v8::PinScope<'_, '_>,
+            v8::FunctionCallbackArguments,
+            v8::ReturnValue,
+            &Sender<PendingPromise>,
+        ) + Send
         + Sync,
 >;
 
@@ -37,8 +39,6 @@ pub struct PendingPromise {
     pub resolver: v8::Global<v8::PromiseResolver>,
     pub rx: oneshot::Receiver<ToolResult>,
 }
-
-pub type PendingQueue = RefCell<VecDeque<PendingPromise>>;
 
 pub struct ToolDef {
     pub name: String,
@@ -130,7 +130,7 @@ pub mod macros {
                         let resolver = $crate::v8::Global::new(scope, resolver);
 
                         let (tx, rx) = tokio::sync::oneshot::channel();
-                        pending.borrow_mut().push_back($crate::sandbox::tool::PendingPromise { resolver, rx });
+                        pending.send($crate::sandbox::tool::PendingPromise { resolver, rx }).unwrap();
 
                         let __fut = $body;
                         tokio::spawn(async move {
@@ -158,6 +158,18 @@ pub enum ToolError {
     #[error("{0}")]
     Browser(#[from] chromiumoxide::error::CdpError),
 
+    #[error("mcp intialization error: {0}")]
+    McpInitialization(Box<rmcp::service::ClientInitializeError>),
+
+    #[error("mcp error: {0}")]
+    McpData(#[from] rmcp::ErrorData),
+
+    #[error("mcp service error: {0}")]
+    McpService(#[from] rmcp::service::ServiceError),
+
+    #[error("mcp tool parameters expected to be json object, got {0}")]
+    McpParamType(TsType),
+
     #[error("{0}")]
     Custom(String),
 
@@ -168,5 +180,11 @@ pub enum ToolError {
 impl ToolError {
     pub fn custom(msg: impl Into<String>) -> Self {
         ToolError::Custom(msg.into())
+    }
+}
+
+impl From<rmcp::service::ClientInitializeError> for ToolError {
+    fn from(error: rmcp::service::ClientInitializeError) -> Self {
+        ToolError::McpInitialization(Box::new(error))
     }
 }

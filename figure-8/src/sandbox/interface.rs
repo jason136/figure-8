@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
+use flume::Sender;
+
 use crate::{
     ToolError, TsType,
-    sandbox::tool::{PendingQueue, ToolDef, ToolHandler},
+    sandbox::tool::{PendingPromise, ToolDef, ToolHandler},
 };
 
 pub(crate) struct InjectedToolData {
     tool: ToolDef,
-    pending: *const PendingQueue,
+    pending_tx: *const Sender<PendingPromise>,
 }
 
 #[derive(Default)]
@@ -106,7 +108,7 @@ impl Interface {
         self,
         scope: &mut v8::PinScope<'_, '_>,
         global: v8::Local<v8::Object>,
-        pending: *const PendingQueue,
+        pending_tx: *const Sender<PendingPromise>,
     ) -> Vec<*mut InjectedToolData> {
         let mut ptrs = Vec::new();
         let mut stack = vec![(self.root, global)];
@@ -115,7 +117,7 @@ impl Interface {
             for (func_name, tool) in node.tools {
                 let key = v8::String::new(scope, &func_name).unwrap();
 
-                let data = Box::into_raw(Box::new(InjectedToolData { tool, pending }));
+                let data = Box::into_raw(Box::new(InjectedToolData { tool, pending_tx }));
                 let external = v8::External::new(scope, data as *mut std::ffi::c_void);
                 let func = v8::Function::builder(tool_callback)
                     .data(external.into())
@@ -155,7 +157,7 @@ fn tool_callback(
     match &data.tool.handler {
         ToolHandler::Sync(cb) => cb(scope, args, rv),
         ToolHandler::Async(cb) => {
-            cb(scope, args, rv, unsafe { &*data.pending });
+            cb(scope, args, rv, unsafe { &*data.pending_tx });
         }
     }
 }

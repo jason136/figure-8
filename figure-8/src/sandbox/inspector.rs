@@ -1,24 +1,22 @@
 use flume::{Receiver, Sender, unbounded};
+use rmcp::serde::{Deserialize, Serialize};
 use v8::inspector::V8InspectorClient;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleMessage {
+    pub level: i32,
+    pub message: String,
+}
+
 pub struct Inspector {
-    stdout: Sender<String>,
-    stderr: Sender<String>,
+    console_tx: Sender<ConsoleMessage>,
 }
 
 impl Inspector {
-    pub fn new() -> (Self, Receiver<String>, Receiver<String>) {
-        let (stdout_tx, stdout_rx) = unbounded();
-        let (stderr_tx, stderr_rx) = unbounded();
+    pub fn new() -> (Self, Receiver<ConsoleMessage>) {
+        let (console_tx, console_rx) = unbounded();
 
-        (
-            Inspector {
-                stdout: stdout_tx,
-                stderr: stderr_tx,
-            },
-            stdout_rx,
-            stderr_rx,
-        )
+        (Inspector { console_tx }, console_rx)
     }
 
     pub fn into_inspector_client(self) -> V8InspectorClient {
@@ -37,14 +35,9 @@ impl v8::inspector::V8InspectorClientImpl for Inspector {
         _column_number: u32,
         _stack_trace: &mut v8::inspector::V8StackTrace,
     ) {
-        let msg = message.to_string();
-        match level {
-            3 | 4 => {
-                let _ = self.stderr.send(msg);
-            }
-            _ => {
-                let _ = self.stdout.send(msg);
-            }
-        }
+        let _ = self.console_tx.send(ConsoleMessage {
+            level,
+            message: message.to_string(),
+        });
     }
 }

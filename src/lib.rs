@@ -1,4 +1,8 @@
-use figure_8::{Interface, Sandbox, builtins::browser::Browser};
+use figure_8::{
+    Interface, Sandbox,
+    builtins::{browser::Browser, mcp::Mcp},
+};
+use futures::future::try_join_all;
 
 use crate::schemas::Capabilities;
 
@@ -8,6 +12,7 @@ pub mod schemas;
 #[derive(Default)]
 pub struct CapabilityHandles {
     browser: Option<Browser>,
+    mcp: Vec<Mcp>,
 }
 
 pub struct InstanceState {
@@ -16,27 +21,40 @@ pub struct InstanceState {
 }
 
 impl InstanceState {
-    pub fn new(capabilities: &[Capabilities]) -> Result<Self, Error> {
-        let (capability_handles, interface) = capabilities.iter().try_fold(
-            (CapabilityHandles::default(), Interface::default()),
-            |(mut handles, mut interface), capability| {
-                match capability {
-                    Capabilities::Browser => {
-                        if handles.browser.is_none() {
-                            let browser = Browser::new(Browser::default_config()?);
-                            interface.extend(browser.default_tools())?;
-                            handles.browser = Some(browser);
-                        }
-                    }
-                };
+    pub async fn new(capabilities: &Capabilities) -> Result<Self, Error> {
+        let mut interface = Interface::default();
 
-                Ok::<_, Error>((handles, interface))
+        let handles = CapabilityHandles {
+            browser: capabilities
+                .browser
+                .as_ref()
+                .map(|_capability| {
+                    let browser = Browser::new(Browser::default_config()?);
+                    interface.extend(browser.default_tools())?;
+                    Ok::<_, Error>(browser)
+                })
+                .transpose()?,
+            mcp: {
+                let mcps = try_join_all(
+                    capabilities
+                        .mcp
+                        .iter()
+                        .map(|capability| async move { Mcp::new(capability.server.as_str()).await })
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
+
+                for mcp in &mcps {
+                    interface.extend(mcp.default_tools()?)?;
+                }
+
+                mcps
             },
-        )?;
+        };
 
         Ok(InstanceState {
             sandbox: Sandbox::new(interface)?,
-            handles: capability_handles,
+            handles,
         })
     }
 }
