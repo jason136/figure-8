@@ -11,21 +11,21 @@ pub mod schemas;
 
 #[derive(Default)]
 pub struct CapabilityHandles {
-    browser: Option<Browser>,
-    mcp: Vec<Mcp>,
+    _browser: Option<Browser>,
+    _mcp: Vec<Mcp>,
 }
 
 pub struct InstanceState {
     pub sandbox: Sandbox,
-    handles: CapabilityHandles,
+    _handles: CapabilityHandles,
 }
 
 impl InstanceState {
     pub async fn new(capabilities: &Capabilities) -> Result<Self, Error> {
         let mut interface = Interface::default();
 
-        let handles = CapabilityHandles {
-            browser: capabilities
+        let _handles = CapabilityHandles {
+            _browser: capabilities
                 .browser
                 .as_ref()
                 .map(|_capability| {
@@ -34,7 +34,7 @@ impl InstanceState {
                     Ok::<_, Error>(browser)
                 })
                 .transpose()?,
-            mcp: {
+            _mcp: {
                 let mcps = try_join_all(
                     capabilities
                         .mcp
@@ -54,7 +54,7 @@ impl InstanceState {
 
         Ok(InstanceState {
             sandbox: Sandbox::new(interface)?,
-            handles,
+            _handles,
         })
     }
 }

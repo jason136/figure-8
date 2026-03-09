@@ -8,7 +8,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::{select, sync::Mutex};
+use tokio::sync::Mutex;
 
 use crate::{
     Error, InstanceState,
