@@ -4,8 +4,9 @@ use chromiumoxide::Page;
 use futures::StreamExt;
 use tokio::sync::RwLock;
 
-use crate::sandbox::tool::ToolDef;
-use crate::{ToolError, tool_async};
+use crate::sandbox::interface::Interface;
+use crate::sandbox::fn_def::FnDef;
+use crate::{JsApi, FnDefError, fn_def_async};
 
 #[derive(Clone)]
 pub struct Browser {
@@ -21,6 +22,20 @@ enum BrowserInner {
     },
 }
 
+impl Interface for Browser {
+    fn extend_api(&self, js_api: &mut JsApi) -> Result<(), FnDefError> {
+        js_api.extend_fn_defs(vec![
+            goto(self.clone()),
+            click(self.clone()),
+            type_into(self.clone()),
+            get_text(self.clone()),
+            get_html(self.clone()),
+        ])?;
+
+        Ok(())
+    }
+}
+
 impl Browser {
     pub fn new(config: chromiumoxide::BrowserConfig) -> Self {
         Browser {
@@ -28,27 +43,15 @@ impl Browser {
         }
     }
 
-    pub fn default_config() -> Result<chromiumoxide::BrowserConfig, ToolError> {
+    pub fn default_config() -> Result<chromiumoxide::BrowserConfig, FnDefError> {
         chromiumoxide::BrowserConfig::builder()
             .arg("--disable-gpu")
             .arg("--disable-dev-shm-usage")
             .build()
-            .map_err(|e| ToolError::custom(e.to_string()))
+            .map_err(|e| FnDefError::custom(e.to_string()))
     }
 
-    pub fn default_tools(&self) -> Vec<ToolDef> {
-        vec![
-            goto(self.clone()),
-            click(self.clone()),
-            type_into(self.clone()),
-            get_text(self.clone()),
-            get_html(self.clone()),
-            screenshot(self.clone()),
-            eval(self.clone()),
-        ]
-    }
-
-    async fn ensure_page(&self) -> Result<Arc<Page>, ToolError> {
+    async fn ensure_page(&self) -> Result<Arc<Page>, FnDefError> {
         match &*self.inner.read().await {
             BrowserInner::Pending(config) => {
                 let (browser, mut handler) =
@@ -72,7 +75,7 @@ impl Browser {
         }
     }
 
-    async fn shutdown_browser(&self) -> Result<(), ToolError> {
+    async fn shutdown_browser(&self) -> Result<(), FnDefError> {
         if let BrowserInner::Initialized {
             browser, config, ..
         } = &mut *self.inner.write().await
@@ -86,30 +89,30 @@ impl Browser {
     }
 }
 
-pub fn shutdown(handle: Browser) -> ToolDef {
-    tool_async!("page.shutdown", "Shutdown the browser", || -> () {
+pub fn shutdown(handle: Browser) -> FnDef {
+    fn_def_async!("page.shutdown", "Shutdown the browser", || -> () {
         let handle = handle.clone();
         async move {
             handle.shutdown_browser().await?;
-            Ok::<_, ToolError>(())
+            Ok::<_, FnDefError>(())
         }
     })
 }
 
-pub fn goto(handle: Browser) -> ToolDef {
-    tool_async!("page.goto", "Navigate to a URL", |url: String| -> () {
+pub fn goto(handle: Browser) -> FnDef {
+    fn_def_async!("page.goto", "Navigate to a URL", |url: String| -> () {
         let handle = handle.clone();
         async move {
             let page = handle.ensure_page().await?;
             page.goto(&url).await?;
             page.wait_for_navigation().await?;
-            Ok::<_, ToolError>(())
+            Ok::<_, FnDefError>(())
         }
     })
 }
 
-pub fn click(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn click(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.click",
         "Click an element by CSS selector",
         |selector: String| -> () {
@@ -117,14 +120,14 @@ pub fn click(handle: Browser) -> ToolDef {
             async move {
                 let page = &handle.ensure_page().await?;
                 page.find_element(&selector).await?.click().await?;
-                Ok::<_, ToolError>(())
+                Ok::<_, FnDefError>(())
             }
         }
     )
 }
 
-pub fn type_into(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn type_into(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.type",
         "Type text into an element",
         |selector: String, text: String| -> () {
@@ -137,14 +140,14 @@ pub fn type_into(handle: Browser) -> ToolDef {
                     .await?
                     .type_str(&text)
                     .await?;
-                Ok::<_, ToolError>(())
+                Ok::<_, FnDefError>(())
             }
         }
     )
 }
 
-pub fn get_text(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn get_text(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.getText",
         "Get inner text of an element",
         |selector: String| -> String {
@@ -155,25 +158,25 @@ pub fn get_text(handle: Browser) -> ToolDef {
                     .await?
                     .inner_text()
                     .await?
-                    .ok_or_else(|| ToolError::custom("element has no text"))
+                    .ok_or_else(|| FnDefError::custom("element has no text"))
             }
         }
     )
 }
 
-pub fn get_html(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn get_html(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.getHtml",
         "Get the full HTML of the page",
         || -> String {
             let handle = handle.clone();
-            async move { Ok::<_, ToolError>(handle.ensure_page().await?.content().await?) }
+            async move { Ok::<_, FnDefError>(handle.ensure_page().await?.content().await?) }
         }
     )
 }
 
-pub fn screenshot(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn screenshot(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.screenshot",
         "Capture a PNG screenshot as base64",
         || -> String {
@@ -186,14 +189,14 @@ pub fn screenshot(handle: Browser) -> ToolDef {
                     .format(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat::Png)
                     .build(),
             ).await?;
-                Ok::<_, ToolError>(base64::engine::general_purpose::STANDARD.encode(&png))
+                Ok::<_, FnDefError>(base64::engine::general_purpose::STANDARD.encode(&png))
             }
         }
     )
 }
 
-pub fn eval(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn eval(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.eval",
         "Evaluate JavaScript in the browser page",
         |code: String| -> String {
@@ -201,28 +204,28 @@ pub fn eval(handle: Browser) -> ToolDef {
             async move {
                 let page = handle.ensure_page().await?;
                 let val: serde_json::Value = page.evaluate_expression(&code).await?.into_value()?;
-                Ok::<_, ToolError>(val.to_string())
+                Ok::<_, FnDefError>(val.to_string())
             }
         }
     )
 }
 
-pub fn wait_for(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn wait_for(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.waitFor",
         "Wait for an element matching a CSS selector",
         |selector: String| -> () {
             let handle = handle.clone();
             async move {
                 handle.ensure_page().await?.find_element(&selector).await?;
-                Ok::<_, ToolError>(())
+                Ok::<_, FnDefError>(())
             }
         }
     )
 }
 
-pub fn get_title(handle: Browser) -> ToolDef {
-    tool_async!(
+pub fn get_title(handle: Browser) -> FnDef {
+    fn_def_async!(
         "page.getTitle",
         "Get the title of the current page",
         || -> String {
@@ -233,7 +236,7 @@ pub fn get_title(handle: Browser) -> ToolDef {
                     .await?
                     .get_title()
                     .await?
-                    .ok_or_else(|| ToolError::custom("no title"))
+                    .ok_or_else(|| FnDefError::custom("no title"))
             }
         }
     )

@@ -6,14 +6,10 @@ use rmcp::{
     service::{Peer, RoleClient, RunningService},
     transport::StreamableHttpClientTransport,
 };
-use tokio::sync::oneshot;
 
 use crate::{
-    FromV8, ToolError, TsType,
-    sandbox::{
-        marshall::json_schema_ts_type,
-        tool::{DeferredValue, PendingPromise, ToolDef, ToolHandler},
-    },
+    FnDefError, JsApi, TsType, fn_def_async,
+    sandbox::{fn_def::FnDef, interface::Interface, marshall::json_schema_ts_type},
 };
 
 #[derive(Clone)]
@@ -23,8 +19,16 @@ pub struct Mcp {
     _service: Arc<RunningService<RoleClient, ()>>,
 }
 
+impl Interface for Mcp {
+    fn extend_api(&self, js_api: &mut JsApi) -> Result<(), FnDefError> {
+        js_api.extend_fn_defs(self.default_tools()?)?;
+
+        Ok(())
+    }
+}
+
 impl Mcp {
-    pub async fn new(server: &str) -> Result<Self, ToolError> {
+    pub async fn new(server: &str) -> Result<Self, FnDefError> {
         let service = ().serve(StreamableHttpClientTransport::from_uri(server)).await?;
         let peer = service.peer().clone();
         let tools = service.list_all_tools().await?;
@@ -36,11 +40,10 @@ impl Mcp {
         })
     }
 
-    pub fn default_tools(&self) -> Result<Vec<ToolDef>, ToolError> {
+    pub fn default_tools(&self) -> Result<Vec<FnDef>, FnDefError> {
         self.tools
             .iter()
             .map(|tool| {
-                let name = tool.name.to_string();
                 let description = tool
                     .description
                     .as_ref()
@@ -48,13 +51,9 @@ impl Mcp {
                     .unwrap_or_default();
 
                 let param_type = json_schema_ts_type(&tool.input_schema);
-                let TsType::Object(params) = param_type else {
-                    return Err(ToolError::McpParamType(param_type));
+                let TsType::Object(tool_params) = param_type else {
+                    return Err(FnDefError::McpParamType(param_type));
                 };
-                let param_names = params
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
 
                 let ret = tool
                     .output_schema
@@ -63,54 +62,32 @@ impl Mcp {
                     .unwrap_or(TsType::Unknown);
 
                 let peer = self.peer.clone();
-                let handler = ToolHandler::Async(Box::new(move |scope, args, mut rv, pending| {
-                    let arguments = param_names
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, name)| {
-                            serde_json::Value::from_v8(scope, args.get(i as i32))
-                                .ok()
-                                .map(|val| (name.clone(), val))
-                        })
-                        .collect::<serde_json::Map<_, _>>();
+                let tool_name = tool.name.to_string();
 
-                    let resolver = v8::PromiseResolver::new(scope).unwrap();
-                    rv.set(resolver.get_promise(scope).into());
-                    let resolver = v8::Global::new(scope, resolver);
-
-                    let (tx, rx) = oneshot::channel();
-                    pending.send(PendingPromise { resolver, rx }).unwrap();
-
-                    let peer_clone = peer.clone();
-                    let name_clone = name.clone().into();
-                    tokio::spawn(async move {
-                        let result = peer_clone
-                            .call_tool(CallToolRequestParams {
-                                meta: None,
-                                name: name_clone,
-                                arguments: (!arguments.is_empty()).then_some(arguments),
-                                task: None,
-                            })
-                            .await;
-
-                        let tool_result = result
-                            .map(|call_result| {
-                                Box::new(serde_json::to_value(&call_result).unwrap_or_default())
-                                    as Box<dyn DeferredValue>
-                            })
-                            .map_err(|e| e.to_string());
-
-                        let _ = tx.send(tool_result);
+                let mut fn_def =
+                    fn_def_async!("mcp", "", |input: serde_json::Value| -> serde_json::Value {
+                        let peer_clone = peer.clone();
+                        let tool_name_clone = tool_name.clone();
+                        async move {
+                            let arguments = input.as_object().filter(|m| !m.is_empty()).cloned();
+                            let result = peer_clone
+                                .call_tool(CallToolRequestParams {
+                                    meta: None,
+                                    name: tool_name_clone.into(),
+                                    arguments,
+                                    task: None,
+                                })
+                                .await?;
+                            Ok::<_, FnDefError>(serde_json::to_value(&result).unwrap_or_default())
+                        }
                     });
-                }));
 
-                Ok(ToolDef {
-                    name: format!("mcp.{}", tool.name),
-                    description,
-                    params,
-                    ret,
-                    handler,
-                })
+                fn_def.name = format!("mcp.{}", tool.name);
+                fn_def.description = description;
+                fn_def.params = vec![("params".to_string(), TsType::Object(tool_params))];
+                fn_def.ret = TsType::Promise(Box::new(ret));
+
+                Ok(fn_def)
             })
             .collect()
     }

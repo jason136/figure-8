@@ -231,8 +231,9 @@ async fn run_tui(
                                     serde_json::from_str::<NegotiationResponse>(&text)
                             {
                                 match negotiation_response {
-                                    NegotiationResponse::Success => {
+                                    NegotiationResponse::Success { interface } => {
                                         output.push("Connected successfully".to_string());
+                                        output.push(interface);
                                     }
                                     NegotiationResponse::Error { message } => {
                                         *error = Some(message);

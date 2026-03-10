@@ -19,7 +19,7 @@ pub struct Capabilities {
 #[serde(tag = "result")]
 #[serde(rename_all = "snake_case")]
 pub enum NegotiationResponse {
-    Success,
+    Success { interface: String },
     Error { message: String },
 }
 

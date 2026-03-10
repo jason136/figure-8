@@ -80,17 +80,19 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
                         }
                     });
 
-                    instance_state = Some(instance);
-
                     let _ = tx
                         .lock()
                         .await
                         .send(Message::Text(
-                            serde_json::to_string(&NegotiationResponse::Success)
-                                .unwrap()
-                                .into(),
+                            serde_json::to_string(&NegotiationResponse::Success {
+                                interface: instance.dts.clone(),
+                            })
+                            .unwrap()
+                            .into(),
                         ))
                         .await;
+
+                    instance_state = Some(instance);
                 }
 
                 Ok::<_, Error>(())

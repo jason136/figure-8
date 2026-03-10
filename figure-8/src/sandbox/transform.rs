@@ -28,8 +28,8 @@ pub fn prepare_repl_source(code: String) -> String {
     };
 
     let decl_names = {
-        let mut declared: Vec<String> = Vec::new();
-        let mut exported: HashSet<String> = HashSet::new();
+        let mut declared = Vec::new();
+        let mut exported = HashSet::new();
 
         for stmt in &ret.program.body {
             match stmt {
@@ -71,6 +71,7 @@ pub fn prepare_repl_source(code: String) -> String {
                             _ => {}
                         }
                     }
+
                     if exp.source.is_none() {
                         for spec in &exp.specifiers {
                             let name = match &spec.local {
@@ -78,6 +79,7 @@ pub fn prepare_repl_source(code: String) -> String {
                                 ModuleExportName::IdentifierReference(id) => id.name.to_string(),
                                 ModuleExportName::StringLiteral(s) => s.value.to_string(),
                             };
+
                             exported.insert(name);
                         }
                     }

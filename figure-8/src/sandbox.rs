@@ -3,22 +3,22 @@ use std::sync::Once;
 use flume::{Receiver, Sender, unbounded};
 use tokio::sync::oneshot;
 
-use interface::Interface;
+use interface::JsApi;
 
 use crate::{
-    ToolError,
+    FnDefError,
     sandbox::{
+        fn_def::PendingPromise,
         inspector::{ConsoleMessage, Inspector},
         interface::free_injected_data,
-        tool::PendingPromise,
         transform::{globalize_namespace, prepare_repl_source},
     },
 };
 
+pub mod fn_def;
 pub mod inspector;
 pub mod interface;
 pub mod marshall;
-pub mod tool;
 pub mod transform;
 
 fn ensure_v8() {
@@ -43,7 +43,7 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    pub fn new(interface: Interface) -> Result<Self, ToolError> {
+    pub fn new(js_api: JsApi) -> Result<Self, FnDefError> {
         ensure_v8();
 
         let (inspector, console_rx) = Inspector::new();
@@ -53,7 +53,7 @@ impl Sandbox {
 
         let _handle = std::thread::spawn(move || {
             let _guard = tokio_handle.enter();
-            spawn_isolate(interface, command_rx, inspector);
+            spawn_isolate(js_api, command_rx, inspector);
         });
 
         Ok(Sandbox {
@@ -78,7 +78,7 @@ impl Sandbox {
     }
 }
 
-fn spawn_isolate(interface: Interface, command_rx: Receiver<SandboxCommand>, inspector: Inspector) {
+fn spawn_isolate(js_api: JsApi, command_rx: Receiver<SandboxCommand>, inspector: Inspector) {
     let injected_ptrs;
     {
         let mut isolate = v8::Isolate::new(Default::default());
@@ -99,7 +99,7 @@ fn spawn_isolate(interface: Interface, command_rx: Receiver<SandboxCommand>, ins
             let scope = &mut v8::ContextScope::new(scope, context);
             let global = context.global(scope);
 
-            injected_ptrs = interface.inject(scope, global, pending_ptr);
+            injected_ptrs = js_api.inject(scope, global, pending_ptr);
 
             v8::Global::new(scope, context)
         };
@@ -198,7 +198,7 @@ fn execute_module(
         let resolver = v8::Local::new(scope, &resolver);
         match result {
             Ok(value) => {
-                let val = value.to_v8(scope);
+                let val = value.into_v8(scope);
                 resolver.resolve(scope, val);
             }
             Err(msg) => {
@@ -233,9 +233,9 @@ fn execute_module(
 
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    #[error("javascript error: {0}")]
+    #[error("{0}")]
     JsError(String),
 
-    #[error("internal error: {0}")]
+    #[error("{0}")]
     InternalError(String),
 }

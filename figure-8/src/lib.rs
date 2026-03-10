@@ -3,9 +3,9 @@ pub mod sandbox;
 
 pub use sandbox::{
     Sandbox, SandboxError,
-    interface::Interface,
-    marshall::{FromV8, ToV8, TsType, TsTyped},
-    tool::{ToolDef, ToolError},
+    fn_def::{FnDef, FnDefError},
+    interface::JsApi,
+    marshall::{FromV8, IntoV8, TsType, TsTyped},
 };
 
 pub use chromiumoxide;

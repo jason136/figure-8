@@ -14,8 +14,8 @@ pub trait FromV8: Sized {
     ) -> Result<Self, MarshalError>;
 }
 
-pub trait ToV8: TsTyped {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value>;
+pub trait IntoV8: TsTyped {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +28,7 @@ pub enum TsType {
     Array(Box<TsType>),
     Optional(Box<TsType>),
     Promise(Box<TsType>),
+    ArrayBuffer,
     Record(Box<TsType>, Box<TsType>),
     Object(Vec<(String, TsType)>),
 }
@@ -42,6 +43,7 @@ impl fmt::Display for TsType {
             TsType::Unknown => write!(f, "unknown"),
             TsType::Array(inner) => write!(f, "{inner}[]"),
             TsType::Optional(inner) => write!(f, "{inner} | undefined"),
+            TsType::ArrayBuffer => write!(f, "ArrayBuffer"),
             TsType::Promise(inner) => write!(f, "Promise<{inner}>"),
             TsType::Record(k, v) => write!(f, "Record<{k}, {v}>"),
             TsType::Object(fields) => write!(
@@ -54,6 +56,24 @@ impl fmt::Display for TsType {
                     .join(", ")
             ),
         }
+    }
+}
+
+pub trait ObjExt {
+    fn set_obj(&self, scope: &mut v8::PinScope<'_, '_>, key: &str, value: impl IntoV8);
+}
+
+impl ObjExt for v8::Object {
+    fn set_obj(&self, scope: &mut v8::PinScope<'_, '_>, key: &str, value: impl IntoV8) {
+        let k = v8::String::new(scope, key).unwrap().into();
+        let v = value.into_v8(scope);
+        self.set(scope, k, v);
+    }
+}
+
+impl<T: TsTyped> TsTyped for &T {
+    fn ts_type() -> TsType {
+        T::ts_type()
     }
 }
 
@@ -114,6 +134,12 @@ impl TsTyped for serde_json::Value {
 impl<V: TsTyped> TsTyped for HashMap<String, V> {
     fn ts_type() -> TsType {
         TsType::Record(Box::new(TsType::String), Box::new(V::ts_type()))
+    }
+}
+
+impl TsTyped for Vec<u8> {
+    fn ts_type() -> TsType {
+        TsType::ArrayBuffer
     }
 }
 
@@ -269,6 +295,38 @@ impl<T: FromV8> FromV8 for Option<T> {
     }
 }
 
+impl FromV8 for Vec<u8> {
+    fn from_v8(
+        scope: &mut v8::PinScope<'_, '_>,
+        value: v8::Local<v8::Value>,
+    ) -> Result<Self, MarshalError> {
+        if value.is_array_buffer_view() {
+            let view: v8::Local<v8::ArrayBufferView> = value.try_into().unwrap();
+            let mut buf = vec![0u8; view.byte_length()];
+            view.copy_contents(&mut buf);
+
+            Ok(buf)
+        } else if value.is_array_buffer() {
+            let ab: v8::Local<v8::ArrayBuffer> = value.try_into().unwrap();
+            let len = ab.byte_length();
+            if len == 0 {
+                return Ok(Vec::new());
+            }
+
+            let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+            let mut buf = vec![0u8; len];
+            view.copy_contents(&mut buf);
+
+            Ok(buf)
+        } else {
+            Err(MarshalError::TypeMismatch {
+                expected: "ArrayBuffer or TypedArray",
+                got: value.to_rust_string_lossy(scope),
+            })
+        }
+    }
+}
+
 impl FromV8 for serde_json::Value {
     fn from_v8(
         scope: &mut v8::PinScope<'_, '_>,
@@ -322,47 +380,47 @@ impl FromV8 for serde_json::Value {
     }
 }
 
-impl ToV8 for f64 {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Number::new(scope, *self).into()
+impl IntoV8 for f64 {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Number::new(scope, self).into()
     }
 }
 
-impl ToV8 for i32 {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Integer::new(scope, *self).into()
+impl IntoV8 for i32 {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Integer::new(scope, self).into()
     }
 }
 
-impl ToV8 for u32 {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Integer::new_from_unsigned(scope, *self).into()
+impl IntoV8 for u32 {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Integer::new_from_unsigned(scope, self).into()
     }
 }
 
-impl ToV8 for String {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::String::new(scope, self).unwrap().into()
+impl IntoV8 for String {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::String::new(scope, &self).unwrap().into()
     }
 }
 
-impl ToV8 for bool {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        v8::Boolean::new(scope, *self).into()
+impl IntoV8 for bool {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        v8::Boolean::new(scope, self).into()
     }
 }
 
-impl ToV8 for () {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl IntoV8 for () {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         v8::undefined(scope).into()
     }
 }
 
-impl<T: ToV8> ToV8 for Vec<T> {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<T: IntoV8> IntoV8 for Vec<T> {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         let array = v8::Array::new(scope, self.len() as i32);
-        for (i, item) in self.iter().enumerate() {
-            let val = item.to_v8(scope);
+        for (i, item) in self.into_iter().enumerate() {
+            let val = item.into_v8(scope);
             array.set_index(scope, i as u32, val);
         }
 
@@ -370,28 +428,35 @@ impl<T: ToV8> ToV8 for Vec<T> {
     }
 }
 
-impl<T: ToV8> ToV8 for Option<T> {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<T: IntoV8> IntoV8 for Option<T> {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         match self {
-            Some(val) => val.to_v8(scope),
+            Some(val) => val.into_v8(scope),
             None => v8::undefined(scope).into(),
         }
     }
 }
 
-impl ToV8 for serde_json::Value {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl IntoV8 for Vec<u8> {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        let store = v8::ArrayBuffer::new_backing_store_from_vec(self).make_shared();
+        v8::ArrayBuffer::with_backing_store(scope, &store).into()
+    }
+}
+
+impl IntoV8 for serde_json::Value {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         match self {
             serde_json::Value::Null => v8::null(scope).into(),
-            serde_json::Value::Bool(b) => v8::Boolean::new(scope, *b).into(),
+            serde_json::Value::Bool(b) => v8::Boolean::new(scope, b).into(),
             serde_json::Value::Number(n) => {
                 v8::Number::new(scope, n.as_f64().unwrap_or(0.0)).into()
             }
-            serde_json::Value::String(s) => v8::String::new(scope, s).unwrap().into(),
+            serde_json::Value::String(s) => v8::String::new(scope, &s).unwrap().into(),
             serde_json::Value::Array(arr) => {
                 let v8_arr = v8::Array::new(scope, arr.len() as i32);
-                for (i, item) in arr.iter().enumerate() {
-                    let val = item.to_v8(scope);
+                for (i, item) in arr.into_iter().enumerate() {
+                    let val = item.into_v8(scope);
                     v8_arr.set_index(scope, i as u32, val);
                 }
 
@@ -400,8 +465,8 @@ impl ToV8 for serde_json::Value {
             serde_json::Value::Object(map) => {
                 let obj = v8::Object::new(scope);
                 for (key, val) in map {
-                    let k = v8::String::new(scope, key).unwrap();
-                    let v = val.to_v8(scope);
+                    let k = v8::String::new(scope, &key).unwrap();
+                    let v = val.into_v8(scope);
                     obj.set(scope, k.into(), v);
                 }
 
@@ -411,12 +476,12 @@ impl ToV8 for serde_json::Value {
     }
 }
 
-impl<V: ToV8> ToV8 for HashMap<String, V> {
-    fn to_v8<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+impl<V: IntoV8> IntoV8 for HashMap<String, V> {
+    fn into_v8<'s>(self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         let obj = v8::Object::new(scope);
         for (key, value) in self {
-            let k = v8::String::new(scope, key).unwrap();
-            let v = value.to_v8(scope);
+            let k = v8::String::new(scope, &key).unwrap();
+            let v = value.into_v8(scope);
             obj.set(scope, k.into(), v);
         }
 

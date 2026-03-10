@@ -1,8 +1,10 @@
 use figure_8::{
-    Interface, Sandbox,
-    builtins::{browser::Browser, mcp::Mcp},
+    JsApi, Sandbox,
+    builtins::{browser::Browser, fetch::Fetch, mcp::Mcp},
+    sandbox::interface::Interface,
 };
 use futures::future::try_join_all;
+use tokio::sync::OnceCell;
 
 use crate::schemas::Capabilities;
 
@@ -13,16 +15,18 @@ pub mod schemas;
 pub struct CapabilityHandles {
     _browser: Option<Browser>,
     _mcp: Vec<Mcp>,
+    _fetch: Option<Fetch>,
 }
 
 pub struct InstanceState {
     pub sandbox: Sandbox,
+    pub dts: String,
     _handles: CapabilityHandles,
 }
 
 impl InstanceState {
     pub async fn new(capabilities: &Capabilities) -> Result<Self, Error> {
-        let mut interface = Interface::default();
+        let mut js_api = JsApi::default();
 
         let _handles = CapabilityHandles {
             _browser: capabilities
@@ -30,7 +34,8 @@ impl InstanceState {
                 .as_ref()
                 .map(|_capability| {
                     let browser = Browser::new(Browser::default_config()?);
-                    interface.extend(browser.default_tools())?;
+                    browser.extend_api(&mut js_api)?;
+
                     Ok::<_, Error>(browser)
                 })
                 .transpose()?,
@@ -45,15 +50,28 @@ impl InstanceState {
                 .await?;
 
                 for mcp in &mcps {
-                    interface.extend(mcp.default_tools()?)?;
+                    mcp.extend_api(&mut js_api)?;
                 }
 
                 mcps
             },
+            _fetch: {
+                static REQWEST_CLIENT: OnceCell<reqwest::Client> = OnceCell::const_new();
+
+                let client = REQWEST_CLIENT
+                    .get_or_init(|| async { reqwest::Client::new() })
+                    .await;
+
+                let fetch = Fetch::new(client.clone());
+                fetch.extend_api(&mut js_api)?;
+
+                Some(fetch)
+            },
         };
 
         Ok(InstanceState {
-            sandbox: Sandbox::new(interface)?,
+            dts: js_api.generate_dts(),
+            sandbox: Sandbox::new(js_api)?,
             _handles,
         })
     }
@@ -77,5 +95,5 @@ pub enum Error {
     Sandbox(#[from] figure_8::SandboxError),
 
     #[error("tool error: {0}")]
-    Tool(#[from] figure_8::ToolError),
+    Tool(#[from] figure_8::FnDefError),
 }
