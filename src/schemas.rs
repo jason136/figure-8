@@ -2,6 +2,12 @@ use figure_8::sandbox::inspector::ConsoleMessage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct FsCapability {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchCapability {}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BrowserCapability {}
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -11,6 +17,8 @@ pub struct McpCapability {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Capabilities {
+    pub fs: Option<FsCapability>,
+    pub fetch: Option<FetchCapability>,
     pub browser: Option<BrowserCapability>,
     pub mcp: Vec<McpCapability>,
 }

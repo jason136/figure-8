@@ -20,6 +20,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+async-trait = "0.1"
+
+base64 = "0.22"
+
 oxc_parser = "0.116"
 oxc_ast = "0.116"
 oxc_allocator = "0.116"
@@ -27,5 +31,3 @@ oxc_span = "0.116"
 oxc_transformer = "0.116"
 oxc_codegen = "0.116"
 oxc_semantic = "0.116"
-
-base64 = "0.22"

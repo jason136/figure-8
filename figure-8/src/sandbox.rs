@@ -50,9 +50,11 @@ impl Sandbox {
 
         let (command_tx, command_rx) = unbounded();
         let tokio_handle = tokio::runtime::Handle::current();
+        let span = tracing::Span::current();
 
         let _handle = std::thread::spawn(move || {
             let _guard = tokio_handle.enter();
+            let _span_guard = span.enter();
             spawn_isolate(js_api, command_rx, inspector);
         });
 

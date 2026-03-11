@@ -1,7 +1,7 @@
-use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::fs::{
     OpenOptions, copy, create_dir_all, metadata, read_dir, read_to_string, remove_dir_all,
     remove_file, write,
@@ -13,11 +13,11 @@ use crate::sandbox::interface::Interface;
 use crate::{FnDefError, JsApi, fn_def_async};
 
 #[derive(Clone)]
-pub struct Fs<T: FsBackend> {
-    backend: T,
+pub struct Fs {
+    backend: Arc<dyn FsBackend>,
 }
 
-impl<T: FsBackend> Interface for Fs<T> {
+impl Interface for Fs {
     fn extend_api(&self, js_api: &mut JsApi) -> Result<(), FnDefError> {
         js_api.extend_fn_defs(vec![
             read_file(self.backend.clone()),
@@ -38,40 +38,22 @@ impl<T: FsBackend> Interface for Fs<T> {
     }
 }
 
-pub trait FsBackend: Clone + Send + Sync + 'static {
-    fn read_file(&self, path: &str) -> impl Future<Output = Result<String, FnDefError>> + Send;
-    fn write_file(
-        &self,
-        path: &str,
-        data: &str,
-    ) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn append_file(
-        &self,
-        path: &str,
-        data: &str,
-    ) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn readdir(&self, path: &str) -> impl Future<Output = Result<Vec<String>, FnDefError>> + Send;
-    fn mkdir(&self, path: &str) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn rm(&self, path: &str) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn stat(
-        &self,
-        path: &str,
-    ) -> impl Future<Output = Result<serde_json::Value, FnDefError>> + Send;
-    fn rename(
-        &self,
-        old_path: &str,
-        new_path: &str,
-    ) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn copy_file(
-        &self,
-        src: &str,
-        dest: &str,
-    ) -> impl Future<Output = Result<(), FnDefError>> + Send;
-    fn access(&self, path: &str) -> impl Future<Output = Result<(), FnDefError>> + Send;
+#[async_trait]
+pub trait FsBackend: Send + Sync + 'static {
+    async fn read_file(&self, path: &str) -> Result<String, FnDefError>;
+    async fn write_file(&self, path: &str, data: &str) -> Result<(), FnDefError>;
+    async fn append_file(&self, path: &str, data: &str) -> Result<(), FnDefError>;
+    async fn readdir(&self, path: &str) -> Result<Vec<String>, FnDefError>;
+    async fn mkdir(&self, path: &str) -> Result<(), FnDefError>;
+    async fn rm(&self, path: &str) -> Result<(), FnDefError>;
+    async fn stat(&self, path: &str) -> Result<serde_json::Value, FnDefError>;
+    async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), FnDefError>;
+    async fn copy_file(&self, src: &str, dest: &str) -> Result<(), FnDefError>;
+    async fn access(&self, path: &str) -> Result<(), FnDefError>;
 }
 
-impl<T: FsBackend> Fs<T> {
-    pub fn new(backend: T) -> Self {
+impl Fs {
+    pub fn new(backend: Arc<dyn FsBackend>) -> Self {
         Fs { backend }
     }
 }
@@ -86,7 +68,7 @@ fn assert_safe_path(path: &str) -> Result<(), FnDefError> {
     Ok(())
 }
 
-fn read_file(handle: impl FsBackend) -> FnDef {
+fn read_file(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.readFile",
         "Read a file and return its contents as a UTF-8 string",
@@ -100,7 +82,7 @@ fn read_file(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn write_file(handle: impl FsBackend) -> FnDef {
+fn write_file(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.writeFile",
         "Write string data to a file, creating it and parent directories as needed",
@@ -114,7 +96,7 @@ fn write_file(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn append_file(handle: impl FsBackend) -> FnDef {
+fn append_file(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.appendFile",
         "Append string data to a file, creating it if it doesn't exist",
@@ -128,7 +110,7 @@ fn append_file(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn readdir(handle: impl FsBackend) -> FnDef {
+fn readdir(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.readdir",
         "Read the contents of a directory",
@@ -142,7 +124,7 @@ fn readdir(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn mkdir(handle: impl FsBackend) -> FnDef {
+fn mkdir(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.mkdir",
         "Create a directory and any missing parent directories",
@@ -156,7 +138,7 @@ fn mkdir(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn rm(handle: impl FsBackend) -> FnDef {
+fn rm(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.rm",
         "Remove a file or directory recursively",
@@ -170,7 +152,7 @@ fn rm(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn raw_stat(handle: impl FsBackend) -> FnDef {
+fn raw_stat(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.__rawStat",
         "Internal: get file metadata",
@@ -185,7 +167,7 @@ fn raw_stat(handle: impl FsBackend) -> FnDef {
 }
 
 #[allow(non_snake_case)]
-fn rename(handle: impl FsBackend) -> FnDef {
+fn rename(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.rename",
         "Rename a file or directory",
@@ -200,7 +182,7 @@ fn rename(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn copy_file(handle: impl FsBackend) -> FnDef {
+fn copy_file(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.copyFile",
         "Copy a file from src to dest",
@@ -215,7 +197,7 @@ fn copy_file(handle: impl FsBackend) -> FnDef {
     )
 }
 
-fn access(handle: impl FsBackend) -> FnDef {
+fn access(handle: Arc<dyn FsBackend>) -> FnDef {
     fn_def_async!(
         "fs.access",
         "Check accessibility of a path, throws if not accessible",
@@ -234,6 +216,15 @@ pub struct LocalFsBackend {
     root: Arc<PathBuf>,
 }
 
+impl LocalFsBackend {
+    pub fn new(root: PathBuf) -> Arc<dyn FsBackend> {
+        Arc::new(Self {
+            root: Arc::new(root),
+        }) as Arc<dyn FsBackend>
+    }
+}
+
+#[async_trait]
 impl FsBackend for LocalFsBackend {
     async fn read_file(&self, path: &str) -> Result<String, FnDefError> {
         let path = self.root.join(path);

@@ -41,7 +41,10 @@ thiserror = { workspace = true }
 
 axum = { version = "0.8", features = ["json", "ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
-tokio-tungstenite = { version = "0.28.0", features = ["connect"] }
+tokio-tungstenite = { version = "0.28.0", features = [
+    "connect",
+    "rustls-tls-native-roots",
+] }
 clap = { version = "4.5", features = ["derive", "env"] }
 
 tracing = "0.1"

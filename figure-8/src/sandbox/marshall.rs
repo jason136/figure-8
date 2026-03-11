@@ -333,15 +333,15 @@ impl FromV8 for serde_json::Value {
         value: v8::Local<v8::Value>,
     ) -> Result<Self, MarshalError> {
         match value {
-            null if value.is_undefined() || value.is_null() => Ok(serde_json::Value::Null),
-            bool if value.is_boolean() => Ok(serde_json::Value::Bool(value.boolean_value(scope))),
-            number if value.is_number() => {
+            _null if value.is_undefined() || value.is_null() => Ok(serde_json::Value::Null),
+            _bool if value.is_boolean() => Ok(serde_json::Value::Bool(value.boolean_value(scope))),
+            _number if value.is_number() => {
                 Ok(serde_json::json!(value.number_value(scope).unwrap()))
             }
-            string if value.is_string() => {
+            _string if value.is_string() => {
                 Ok(serde_json::Value::String(value.to_rust_string_lossy(scope)))
             }
-            array if value.is_array() => {
+            _array if value.is_array() => {
                 let arr: v8::Local<v8::Array> = value.try_into().unwrap();
 
                 Ok(serde_json::Value::Array(
@@ -352,7 +352,7 @@ impl FromV8 for serde_json::Value {
                         .collect::<Result<Vec<_>, _>>()?,
                 ))
             }
-            object if value.is_object() => {
+            _object if value.is_object() => {
                 let obj: v8::Local<v8::Object> = value.try_into().unwrap();
 
                 let names = obj

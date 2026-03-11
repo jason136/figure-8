@@ -72,7 +72,7 @@ pub mod macros {
                 ret,
                 handler: $crate::sandbox::fn_def::FnHandler::Sync(
                     Box::new(move |scope, args, mut rv| {
-                        let __span = tracing::debug_span!("js_fn", name = $name);
+                        let __span = tracing::span!(tracing::Level::INFO, "js_fn", name = $name, result = tracing::field::Empty);
                         let __guard = __span.enter();
                         #[allow(unused)]
                         let mut __i: i32 = 0;
@@ -84,8 +84,12 @@ pub mod macros {
                         #[allow(clippy::redundant_closure_call)]
                         let result: Result<$ret, $crate::FnDefError> = (|| $body)();
                         match result {
-                            Ok(val) => rv.set($crate::IntoV8::into_v8(val, scope)),
+                            Ok(val) => {
+                                __span.record("result", "ok");
+                                rv.set($crate::IntoV8::into_v8(val, scope));
+                            }
                             Err(e) => {
+                                __span.record("result", tracing::field::display(&e));
                                 let msg = $crate::v8::String::new(scope, &e.to_string()).unwrap();
                                 scope.throw_exception($crate::v8::Exception::error(scope, msg));
                             }
@@ -135,13 +139,20 @@ pub mod macros {
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         pending.send($crate::sandbox::fn_def::PendingPromise { resolver, rx }).unwrap();
 
-                        let __span = tracing::debug_span!("js_fn", name = $name);
+                        let __span = tracing::span!(tracing::Level::INFO, "js_fn", name = $name, result = tracing::field::Empty);
+                        let __span_clone = __span.clone();
                         let __fut = $body;
                         tokio::spawn(tracing::Instrument::instrument(
                             async move {
                                 let result: $crate::sandbox::fn_def::ToolResult = match __fut.await {
-                                    Ok(val) => Ok(Box::new(val) as Box<dyn $crate::sandbox::fn_def::DeferredValue>),
-                                    Err(e) => Err(e.to_string()),
+                                    Ok(val) => {
+                                        __span_clone.record("result", "ok");
+                                        Ok(Box::new(val) as Box<dyn $crate::sandbox::fn_def::DeferredValue>)
+                                    }
+                                    Err(e) => {
+                                        __span_clone.record("result", tracing::field::display(&e));
+                                        Err(e.to_string())
+                                    }
                                 };
                                 let _ = tx.send(result);
                             },

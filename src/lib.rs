@@ -1,6 +1,13 @@
+use std::path::PathBuf;
+
 use figure_8::{
     JsApi, Sandbox,
-    builtins::{browser::Browser, fetch::Fetch, mcp::Mcp},
+    builtins::{
+        browser::Browser,
+        fetch::Fetch,
+        fs::{Fs, LocalFsBackend},
+        mcp::Mcp,
+    },
     sandbox::interface::Interface,
 };
 use futures::future::try_join_all;
@@ -13,9 +20,10 @@ pub mod schemas;
 
 #[derive(Default)]
 pub struct CapabilityHandles {
+    _fs: Option<Fs>,
+    _fetch: Option<Fetch>,
     _browser: Option<Browser>,
     _mcp: Vec<Mcp>,
-    _fetch: Option<Fetch>,
 }
 
 pub struct InstanceState {
@@ -29,6 +37,22 @@ impl InstanceState {
         let mut js_api = JsApi::default();
 
         let _handles = CapabilityHandles {
+            _fs: capabilities
+                .fs
+                .as_ref()
+                .map(|_capability| Fs::new(LocalFsBackend::new(PathBuf::from("/tmp/f8-fs")))),
+            _fetch: {
+                static REQWEST_CLIENT: OnceCell<reqwest::Client> = OnceCell::const_new();
+
+                let client = REQWEST_CLIENT
+                    .get_or_init(|| async { reqwest::Client::new() })
+                    .await;
+
+                let fetch = Fetch::new(client.clone());
+                fetch.extend_api(&mut js_api)?;
+
+                Some(fetch)
+            },
             _browser: capabilities
                 .browser
                 .as_ref()
@@ -54,18 +78,6 @@ impl InstanceState {
                 }
 
                 mcps
-            },
-            _fetch: {
-                static REQWEST_CLIENT: OnceCell<reqwest::Client> = OnceCell::const_new();
-
-                let client = REQWEST_CLIENT
-                    .get_or_init(|| async { reqwest::Client::new() })
-                    .await;
-
-                let fetch = Fetch::new(client.clone());
-                fetch.extend_api(&mut js_api)?;
-
-                Some(fetch)
             },
         };
 

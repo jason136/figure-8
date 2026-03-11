@@ -209,6 +209,8 @@ async fn run_tui(
                             *error = None;
 
                             let capabilities = Capabilities {
+                                fs: None,
+                                fetch: None,
                                 browser: selected[0].then_some(BrowserCapability {}),
                                 mcp: mcp_servers
                                     .iter()
