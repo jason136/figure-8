@@ -22,7 +22,7 @@ use tui_textarea::TextArea;
 use figure_8_bin::{
     Error,
     schemas::{
-        BrowserCapability, Capabilities, LiveExecutionRequest, McpCapability, NegotiationResponse,
+        BrowserCapability, Capabilities, ExecutionRequest, McpCapability, NegotiationResponse,
     },
 };
 
@@ -294,7 +294,7 @@ async fn run_tui(
                                         let code = textarea.lines().join("\n");
 
                                         if !code.trim().is_empty() {
-                                            let json = serde_json::to_string(&LiveExecutionRequest { code }).unwrap();
+                                            let json = serde_json::to_string(&ExecutionRequest { code }).unwrap();
 
                                             ws_tx.send(Message::Text(json.into())).await?;
 

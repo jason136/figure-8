@@ -14,7 +14,7 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use figure_8_bin::{
     AppState, Error,
-    handlers::{health, live, session_create, session_delete, session_query},
+    handlers::{health, live, session_create, session_delete, session_execute, session_get},
     session_reaper,
 };
 
@@ -46,10 +46,11 @@ async fn main() -> Result<(), Error> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/live", get(live))
+        .route("/session", post(session_create))
         .route(
-            "/session",
-            post(session_create)
-                .patch(session_query)
+            "/session/{id}",
+            get(session_get)
+                .patch(session_execute)
                 .delete(session_delete),
         )
         .with_state(AppState { sessions, reaper });

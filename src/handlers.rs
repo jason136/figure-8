@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{State, WebSocketUpgrade, ws::Message},
+    extract::{Path, State, WebSocketUpgrade, ws::Message},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -14,8 +14,7 @@ use uuid::Uuid;
 use crate::{
     AppState, Error, InstanceState,
     schemas::{
-        Capabilities, ExecutionResponse, LiveExecutionRequest, NegotiationResponse,
-        SessionDeleteRequest, SessionExecutionRequest, SessionExecutionResponse,
+        Capabilities, ExecutionRequest, ExecutionResponse, ExecutionResponses, NegotiationResponse,
     },
 };
 
@@ -52,7 +51,7 @@ pub async fn live(ws: WebSocketUpgrade, State(_app_state): State<AppState>) -> R
 
             if let Err(e) = async {
                 if let Some(instance_state) = &mut instance_state {
-                    let LiveExecutionRequest { code } = serde_json::from_slice(msg_bytes)?;
+                    let ExecutionRequest { code } = serde_json::from_slice(msg_bytes)?;
 
                     instance_state.sandbox.execute(&code).await?;
                 } else {
@@ -127,19 +126,48 @@ pub async fn session_create(
     }
     .await
     {
-        Ok((interface, id)) => Json(NegotiationResponse::Success {
-            interface,
-            session_id: Some(id),
-        }),
-        Err(e) => Json(NegotiationResponse::Error {
-            message: e.to_string(),
-        }),
+        Ok((interface, id)) => (
+            StatusCode::OK,
+            Json(NegotiationResponse::Success {
+                interface,
+                session_id: Some(id),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(NegotiationResponse::Error {
+                message: e.to_string(),
+            }),
+        ),
     }
 }
 
-pub async fn session_query(
+pub async fn session_get(
     State(AppState { sessions, .. }): State<AppState>,
-    Json(SessionExecutionRequest { session_id, code }): Json<SessionExecutionRequest>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(instance) = sessions.write().await.get(&session_id).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(NegotiationResponse::Error {
+                message: Error::SessionNotFound.to_string(),
+            }),
+        );
+    };
+
+    (
+        StatusCode::OK,
+        Json(NegotiationResponse::Success {
+            interface: instance.dts.clone(),
+            session_id: None,
+        }),
+    )
+}
+
+pub async fn session_execute(
+    State(AppState { sessions, .. }): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(ExecutionRequest { code }): Json<ExecutionRequest>,
 ) -> impl IntoResponse {
     let mut responses = Vec::new();
     if let Err(e) = async {
@@ -166,12 +194,12 @@ pub async fn session_query(
         });
     }
 
-    Json(SessionExecutionResponse { responses })
+    (StatusCode::OK, Json(ExecutionResponses { responses }))
 }
 
 pub async fn session_delete(
     State(AppState { sessions, .. }): State<AppState>,
-    Json(SessionDeleteRequest { session_id }): Json<SessionDeleteRequest>,
+    Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     sessions.write().await.pop(&session_id);
 

@@ -38,13 +38,7 @@ pub enum NegotiationResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LiveExecutionRequest {
-    pub code: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionExecutionRequest {
-    pub session_id: String,
+pub struct ExecutionRequest {
     pub code: String,
 }
 
@@ -57,11 +51,6 @@ pub enum ExecutionResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SessionExecutionResponse {
+pub struct ExecutionResponses {
     pub responses: Vec<ExecutionResponse>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionDeleteRequest {
-    pub session_id: String,
 }

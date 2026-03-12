@@ -12,6 +12,10 @@ name = "f8server"
 path = "src/bin/server.rs"
 
 [[bin]]
+name = "f8cli"
+path = "src/bin/cli.rs"
+
+[[bin]]
 name = "f8tui"
 path = "src/bin/tui.rs"
 required-features = ["tui"]
