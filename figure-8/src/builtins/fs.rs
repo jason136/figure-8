@@ -53,8 +53,10 @@ pub trait FsBackend: Send + Sync + 'static {
 }
 
 impl Fs {
-    pub fn new(backend: Arc<dyn FsBackend>) -> Self {
-        Fs { backend }
+    pub fn from_local_path(path: PathBuf) -> Self {
+        Fs {
+            backend: Arc::new(LocalFsBackend { root: path }),
+        }
     }
 }
 
@@ -213,15 +215,7 @@ fn access(handle: Arc<dyn FsBackend>) -> FnDef {
 
 #[derive(Clone)]
 pub struct LocalFsBackend {
-    root: Arc<PathBuf>,
-}
-
-impl LocalFsBackend {
-    pub fn new(root: PathBuf) -> Arc<dyn FsBackend> {
-        Arc::new(Self {
-            root: Arc::new(root),
-        }) as Arc<dyn FsBackend>
-    }
+    root: PathBuf,
 }
 
 #[async_trait]

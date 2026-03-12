@@ -1,12 +1,21 @@
-use axum::{Router, routing::get};
+use std::{num::NonZero, sync::Arc};
+
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use clap::Parser;
-use tokio::net::{TcpListener, UnixListener};
+use lru::LruCache;
+use tokio::{
+    net::{TcpListener, UnixListener},
+    sync::RwLock,
+};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use figure_8_bin::{
-    Error,
-    handlers::AppState,
-    handlers::{health, stream},
+    AppState, Error,
+    handlers::{health, live, session_create, session_delete, session_query},
+    session_reaper,
 };
 
 #[derive(Debug, Parser)]
@@ -31,10 +40,19 @@ async fn main() -> Result<(), Error> {
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
+    let sessions = Arc::new(RwLock::new(LruCache::new(NonZero::new(1000).unwrap())));
+    let reaper = Arc::new(tokio::spawn(session_reaper(sessions.clone())));
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/stream", get(stream))
-        .with_state(AppState {});
+        .route("/live", get(live))
+        .route(
+            "/session",
+            post(session_create)
+                .patch(session_query)
+                .delete(session_delete),
+        )
+        .with_state(AppState { sessions, reaper });
 
     if let Some(socket) = args.socket {
         let listener = UnixListener::bind(socket)?;

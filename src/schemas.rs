@@ -27,12 +27,24 @@ pub struct Capabilities {
 #[serde(tag = "result")]
 #[serde(rename_all = "snake_case")]
 pub enum NegotiationResponse {
-    Success { interface: String },
-    Error { message: String },
+    Success {
+        interface: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ExecutionRequest {
+pub struct LiveExecutionRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionExecutionRequest {
+    pub session_id: String,
     pub code: String,
 }
 
@@ -42,4 +54,14 @@ pub struct ExecutionRequest {
 pub enum ExecutionResponse {
     Console { message: ConsoleMessage },
     Error { message: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionExecutionResponse {
+    pub responses: Vec<ExecutionResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionDeleteRequest {
+    pub session_id: String,
 }

@@ -9,14 +9,15 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::{
-    Error, InstanceState,
-    schemas::{ExecutionRequest, ExecutionResponse, NegotiationResponse},
+    AppState, Error, InstanceState,
+    schemas::{
+        Capabilities, ExecutionResponse, LiveExecutionRequest, NegotiationResponse,
+        SessionDeleteRequest, SessionExecutionRequest, SessionExecutionResponse,
+    },
 };
-
-#[derive(Clone)]
-pub struct AppState {}
 
 pub async fn health() -> impl IntoResponse {
     (
@@ -28,7 +29,7 @@ pub async fn health() -> impl IntoResponse {
 }
 
 #[axum::debug_handler]
-pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) -> Response {
+pub async fn live(ws: WebSocketUpgrade, State(_app_state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| async move {
         let mut instance_state: Option<InstanceState> = None;
         let (tx, mut rx) = socket.split();
@@ -51,7 +52,7 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
 
             if let Err(e) = async {
                 if let Some(instance_state) = &mut instance_state {
-                    let ExecutionRequest { code } = serde_json::from_slice(msg_bytes)?;
+                    let LiveExecutionRequest { code } = serde_json::from_slice(msg_bytes)?;
 
                     instance_state.sandbox.execute(&code).await?;
                 } else {
@@ -86,6 +87,7 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
                         .send(Message::Text(
                             serde_json::to_string(&NegotiationResponse::Success {
                                 interface: instance.dts.clone(),
+                                session_id: None,
                             })
                             .unwrap()
                             .into(),
@@ -108,4 +110,70 @@ pub async fn stream(ws: WebSocketUpgrade, State(_app_state): State<AppState>) ->
             }
         }
     })
+}
+
+pub async fn session_create(
+    State(AppState { sessions, .. }): State<AppState>,
+    Json(capabilities): Json<Capabilities>,
+) -> impl IntoResponse {
+    match async {
+        let id = Uuid::new_v4().to_string();
+
+        let instance = InstanceState::new(&capabilities).await?;
+        let interface = instance.dts.clone();
+        sessions.write().await.put(id.clone(), Arc::new(instance));
+
+        Ok::<_, Error>((interface, id))
+    }
+    .await
+    {
+        Ok((interface, id)) => Json(NegotiationResponse::Success {
+            interface,
+            session_id: Some(id),
+        }),
+        Err(e) => Json(NegotiationResponse::Error {
+            message: e.to_string(),
+        }),
+    }
+}
+
+pub async fn session_query(
+    State(AppState { sessions, .. }): State<AppState>,
+    Json(SessionExecutionRequest { session_id, code }): Json<SessionExecutionRequest>,
+) -> impl IntoResponse {
+    let mut responses = Vec::new();
+    if let Err(e) = async {
+        let Some(instance) = sessions.write().await.get(&session_id).cloned() else {
+            return Err(Error::SessionNotFound);
+        };
+
+        instance.sandbox.execute(&code).await?;
+
+        responses.extend(
+            instance
+                .sandbox
+                .console_rx
+                .drain()
+                .map(|message| ExecutionResponse::Console { message }),
+        );
+
+        Ok::<_, Error>(())
+    }
+    .await
+    {
+        responses.push(ExecutionResponse::Error {
+            message: e.to_string(),
+        });
+    }
+
+    Json(SessionExecutionResponse { responses })
+}
+
+pub async fn session_delete(
+    State(AppState { sessions, .. }): State<AppState>,
+    Json(SessionDeleteRequest { session_id }): Json<SessionDeleteRequest>,
+) -> impl IntoResponse {
+    sessions.write().await.pop(&session_id);
+
+    StatusCode::OK
 }
