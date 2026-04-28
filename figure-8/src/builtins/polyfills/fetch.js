@@ -6,6 +6,8 @@
   delete globalThis.__utf8Decode;
   delete globalThis.__utf8Encode;
 
+  const _blobBuffer = Symbol('blobBuffer');
+
   class TextDecoder {
     #encoding;
     constructor(label) {
@@ -34,10 +36,29 @@
     }
     encodeInto(src, dest) {
       const encoded = this.encode(src);
-      const written = Math.min(encoded.length, dest.length);
+      if (encoded.length <= dest.length) {
+        dest.set(encoded);
+        return { read: src.length, written: encoded.length };
+      }
+      let written = dest.length;
+      while (written > 0 && (encoded[written] & 0xc0) === 0x80) written--;
       dest.set(encoded.subarray(0, written));
-      return { read: src.length, written };
+      const read = __decode(encoded.subarray(0, written)).length;
+      return { read, written };
     }
+  }
+
+  function toArrayBuffer(value) {
+    if (value instanceof ArrayBuffer) return value;
+    if (ArrayBuffer.isView(value))
+      return value.buffer.slice(
+        value.byteOffset,
+        value.byteOffset + value.byteLength,
+      );
+    if (value != null && typeof value[_blobBuffer] !== 'undefined')
+      return value[_blobBuffer].slice(0);
+    if (value !== null && value !== undefined) return __encode(String(value));
+    return new ArrayBuffer(0);
   }
 
   class Blob {
@@ -74,6 +95,9 @@
     }
     get type() {
       return this.#type;
+    }
+    get [_blobBuffer]() {
+      return this.#buffer;
     }
     async arrayBuffer() {
       return this.#buffer.slice(0);
@@ -149,10 +173,7 @@
     #consumed;
     constructor(body, init) {
       if (init === undefined) init = {};
-      if (body instanceof ArrayBuffer) this.#body = body;
-      else if (body !== null && body !== undefined)
-        this.#body = __encode(String(body));
-      else this.#body = new ArrayBuffer(0);
+      this.#body = toArrayBuffer(body);
       this.#consumed = false;
       this.status = init.status !== undefined ? init.status : 200;
       this.statusText = init.statusText !== undefined ? init.statusText : '';
@@ -298,7 +319,7 @@
         }
       }
     }
-    const body = init.body != null ? String(init.body) : null;
+    const body = init.body != null ? toArrayBuffer(init.body) : null;
 
     const raw = await __raw(url, method, JSON.stringify(headers), body);
     return new Response(raw.body, raw);

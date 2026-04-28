@@ -15,6 +15,7 @@ impl Interface for Fetch {
         js_api.extend_fn_defs(vec![raw_fetch(self.clone()), utf8_decode(), utf8_encode()])?;
 
         js_api.push_polyfill(include_str!("polyfills/fetch.js"));
+        js_api.push_dts("", include_str!("polyfills/fetch.d.ts"));
 
         Ok(())
     }
@@ -65,14 +66,17 @@ fn raw_fetch(handle: Fetch) -> FnDef {
         |url: String,
          method: String,
          headers_json: String,
-         body: Option<String>|
+         body: Option<Vec<u8>>|
          -> FetchResponse {
             let client = handle.client.clone();
             async move {
                 let method = reqwest::Method::from_bytes(method.as_bytes())
-                    .map_err(|e| FnDefError::custom(format!("invalid HTTP method: {e}")))?;
+                    .map_err(|e| FnDefError::InvalidMethod(e.to_string()))?;
 
-                let mut req = client.request(method, &url);
+                let parsed_url =
+                    reqwest::Url::parse(&url).map_err(|e| FnDefError::InvalidUrl(e.to_string()))?;
+
+                let mut req = client.request(method, parsed_url.clone());
 
                 if let Ok(headers) = serde_json::from_str::<HashMap<String, String>>(&headers_json)
                 {
@@ -88,6 +92,7 @@ fn raw_fetch(handle: Fetch) -> FnDef {
                 let resp = req.send().await?;
                 let status = resp.status().as_u16();
                 let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
+                let redirected = *resp.url() != parsed_url;
                 let final_url = resp.url().to_string();
 
                 let headers = resp
@@ -103,7 +108,7 @@ fn raw_fetch(handle: Fetch) -> FnDef {
                     status_text,
                     ok: (200..300).contains(&status),
                     headers,
-                    redirected: final_url != url,
+                    redirected,
                     url: final_url,
                     body,
                 })

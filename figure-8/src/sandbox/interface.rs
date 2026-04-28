@@ -4,7 +4,7 @@ use flume::Sender;
 
 use crate::{
     FnDefError, TsType,
-    sandbox::fn_def::{FnDef, PendingPromise, FnHandler},
+    sandbox::fn_def::{FnDef, FnHandler, PendingPromise},
 };
 
 pub(crate) struct InjectedFnData {
@@ -16,6 +16,7 @@ pub(crate) struct InjectedFnData {
 struct Node {
     fn_defs: HashMap<String, FnDef>,
     children: HashMap<String, Node>,
+    dts_extras: Vec<String>,
 }
 
 #[derive(Default)]
@@ -42,6 +43,19 @@ impl JsApi {
 
     pub fn push_polyfill(&mut self, code: impl Into<String>) {
         self.polyfills.push(code.into());
+    }
+
+    pub fn push_dts(&mut self, namespace: &str, dts: impl Into<String>) {
+        let dts = dts.into();
+
+        if namespace.is_empty() {
+            self.root.dts_extras.push(dts);
+        } else {
+            let node = namespace.split('.').fold(&mut self.root, |node, part| {
+                node.children.entry(part.to_string()).or_default()
+            });
+            node.dts_extras.push(unwrap_dts_block(&dts));
+        }
     }
 
     pub fn push_fn_def(&mut self, tool: FnDef) -> Result<(), FnDefError> {
@@ -71,6 +85,10 @@ impl JsApi {
             let mut out = String::new();
 
             for (leaf_name, tool) in &node.fn_defs {
+                if leaf_name.starts_with("__") {
+                    continue;
+                }
+
                 let params = tool
                     .params
                     .iter()
@@ -81,24 +99,34 @@ impl JsApi {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                if is_root {
-                    out.push_str(&format!(
-                        "{pad}declare function {leaf_name}({params}): {};\n",
-                        tool.ret
-                    ));
-                } else {
-                    out.push_str(&format!("{pad}{leaf_name}({params}): {};\n", tool.ret));
+                if !tool.description.is_empty() {
+                    out.push_str(&format!("{pad}/** {} */\n", tool.description));
+                }
+
+                let decl = if is_root { "declare " } else { "" };
+                out.push_str(&format!(
+                    "{pad}{decl}function {leaf_name}({params}): {};\n",
+                    tool.ret
+                ));
+            }
+
+            for extra in &node.dts_extras {
+                for line in extra.lines() {
+                    if line.is_empty() {
+                        out.push('\n');
+                    } else {
+                        out.push_str(&pad);
+                        out.push_str(line);
+                        out.push('\n');
+                    }
                 }
             }
 
             for (name, child) in &node.children {
-                if is_root {
-                    out.push_str(&format!("{pad}declare const {name}: {{\n"));
-                } else {
-                    out.push_str(&format!("{pad}{name}: {{\n"));
-                }
+                let decl = if is_root { "declare " } else { "" };
+                out.push_str(&format!("{pad}{decl}namespace {name} {{\n"));
                 out.push_str(&render(child, indent + 1, false));
-                out.push_str(&format!("{pad}}};\n"));
+                out.push_str(&format!("{pad}}}\n"));
             }
 
             out
@@ -113,7 +141,9 @@ impl JsApi {
         global: v8::Local<v8::Object>,
         pending_tx: *const Sender<PendingPromise>,
     ) -> Vec<*mut InjectedFnData> {
-        let JsApi { root, polyfills } = self;
+        let JsApi {
+            root, polyfills, ..
+        } = self;
         let mut ptrs = Vec::new();
         let mut stack = vec![(root, global)];
 
@@ -155,6 +185,32 @@ pub(crate) unsafe fn free_injected_data(ptrs: Vec<*mut InjectedFnData>) {
     for ptr in ptrs {
         drop(unsafe { Box::from_raw(ptr) });
     }
+}
+
+/// Strip a `declare namespace X { ... }` wrapper, returning the de-indented body.
+fn unwrap_dts_block(dts: &str) -> String {
+    let lines: Vec<&str> = dts.lines().collect();
+
+    let open = lines
+        .iter()
+        .position(|l| l.trim_end().ends_with('{'))
+        .unwrap_or(0);
+    let close = lines
+        .iter()
+        .rposition(|l| l.trim() == "}")
+        .unwrap_or(lines.len());
+
+    lines[open + 1..close]
+        .iter()
+        .map(|line| {
+            if line.chars().all(|c| c.is_whitespace()) {
+                ""
+            } else {
+                line.strip_prefix("  ").unwrap_or(line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn fn_callback(

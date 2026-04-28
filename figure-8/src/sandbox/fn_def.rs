@@ -191,6 +191,12 @@ pub enum FnDefError {
     #[error("{0}")]
     Reqwest(#[from] reqwest::Error),
 
+    #[error("invalid HTTP method: {0}")]
+    InvalidMethod(String),
+
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+
     #[error("unsafe path: expected relative path with no '..', got '{0}'")]
     UnsafePath(String),
 
